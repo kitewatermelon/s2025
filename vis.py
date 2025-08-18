@@ -42,6 +42,6 @@ abs_error_img = Image.fromarray(normalize_img(abs_error_slice))
 
 # 3개 이미지를 동시에 보여주기
 col1, col2, col3 = st.columns(3)
-col1.image(cbct_img, caption=f"CBCT Slice {slice_idx}", use_column_width=True)
-col2.image(ct_img, caption=f"CT Slice {slice_idx}", use_column_width=True)
-col3.image(abs_error_img, caption=f"Absolute Error Slice {slice_idx}", use_column_width=True)
+col1.image(cbct_img, caption=f"CBCT Slice {slice_idx}", use_container_width=True)
+col2.image(ct_img, caption=f"CT Slice {slice_idx}", use_container_width=True)
+col3.image(abs_error_img, caption=f"Absolute Error Slice {slice_idx}", use_container_width=True)
