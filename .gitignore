@@ -1,0 +1,9 @@
+__pycache__/
+**/debug/*
+**/vq_vae/*
+.ruff_cache
+**/checkpoints/*
+**/results/*
+synthRAD2025*/
+Val_Input/
+checkpoints/

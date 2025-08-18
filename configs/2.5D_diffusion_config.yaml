@@ -1,0 +1,76 @@
+# Default settings
+default:
+  experiment_name: "2.5D_vdm_256"  # Updated name to reflect changes
+  make_logs: True
+  device: 0  # GPU device ID
+  random_seed: 42
+  checkpoint_dir: checkpoints
+  # checkpoint_dir: /workspace/data/checkpoints
+
+# Paths
+paths:
+  cbct_vqvae_config: "checkpoints/2.5D_cbct_256/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/2.5D_cbct_256/model_2400.pt"
+  
+  ct_vqvae_config: "checkpoints/2.5D_ct_256/config.yaml"
+  ct_vq_checkpoint: "checkpoints/2.5D_ct_256/model_2400.pt"
+
+optim:
+  lr: 1e-4
+  weight_decay: 0.01
+
+# denoise nn
+uvit:
+  img_size: 64
+  # img_size: 32
+  patch_size: 2
+  # in_chans: 1
+  in_chans: 2
+  embed_dim: 512
+  depth: 11
+  num_heads: 4
+  # conv: False # convolutional layer after transformer to remove artifacts
+  conv: True  # convolutional layer after transformer to remove artifacts
+
+
+# Data settings for latent space
+dataset:
+  data_path: "synthRAD2025_Train_2.5D/Task2"
+  anatomy: 
+    - "AB"
+    - "HN"
+    - "TH"   
+  modality:
+    - "cbct"
+    - "ct"  
+  interpolate: True # ["brain"], ["brain", "pelvis"]
+  interpolation_size: [256, 256]
+  train_batch_size: 6  # should be set to 1 for latent extraction
+  val_batch_size: 6  # should be set  to 1 for latent extraction
+  train_shuffle: True
+  val_shuffle: False
+  num_workers: 6
+  augment: False
+  rand_adj_contrast: 
+    prob: 0.5
+    gamma:
+      - .5
+      - 1.5
+  rand_affine:
+    prob: 0.5
+  minv: 0
+  maxv: 1
+
+
+# noise scheduling
+gamma_min: -5.
+gamma_max: 5.
+noise_schedule: "learned_linear"
+antithetic_time_sampling: True
+use_fourier_features: False
+
+num_steps: 60_000
+# save_and_eval_every: 1
+save_and_eval_every: 1000
+n_sample_steps: 200
+# n_sample_steps: 1
