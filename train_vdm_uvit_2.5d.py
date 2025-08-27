@@ -23,7 +23,7 @@ import numpy as np
 
 
 from monai.networks.nets import VQVAE
-from dataset_2_5d import setup_datasets_diffusion, setup_dataloaders
+from dataset import setup_datasets_diffusion, setup_dataloaders
 import pdb
 
 import json, matplotlib.pyplot as plt

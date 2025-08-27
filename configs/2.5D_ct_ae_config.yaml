@@ -1,14 +1,14 @@
 default:
   random_seed:  42
   device: 0  # "cpu"
-  experiment_name: 2.5D_ct_256
+  experiment_name: 2.5D_ct_PATCH
 
 optim:
   amp: True
   lr_generator: 1e-4
   lr_discriminator: 5e-4
-  num_epochs: 2500
-  val_every: 10
+  num_epochs: 1000
+  val_every: 100
   log_interval: 1
   save_interval: 200
   # checkpoint_dir: "/workspace/data/checkpoints"  # Store checkpoints within experiment directory
@@ -89,7 +89,9 @@ discriminator:
 
 dataset:
   # data_path: "/workspace/data/Task2_2d"
+  # data_path: "VAL/Task2"
   data_path: "synthRAD2025_Train_2.5D/Task2"
+
   anatomy: 
     - "AB"
     - "HN"
@@ -97,21 +99,20 @@ dataset:
   modality:
     - "ct"  # both or comment one
     # - "cbct"
-  interpolate: True
-  interpolation_size: [256, 256]
-  train_batch_size: 16
-  val_batch_size: 16
+  overlap: 0.25
+  train_batch_size: 64
+  val_batch_size: 64
   train_shuffle: True
   val_shuffle: False
-  num_workers: 8
+  num_workers: 0
   minv: 0.0
   maxv: 1.0
-
-  augment: True
+  patch_size: [128, 128]
+  augment: False
   rand_adj_contrast: 
     prob: 0.5
     gamma:
       - .5
       - 1.5
-  rand_affine:
-    prob: 0.5
+  # rand_affine:
+  #   prob: 0.5

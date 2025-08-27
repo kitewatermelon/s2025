@@ -10,7 +10,7 @@ from monai.utils import set_determinism
 
 import matplotlib.pyplot as plt
 import torch
-from dataset_2_5d import setup_dataloaders
+from dataset import setup_dataloaders
 from models.lvdm.utils import setup_scheduler, get_lr
 
 from monai.losses.perceptual import PerceptualLoss
@@ -57,8 +57,13 @@ def main(config):
 
     device = torch.device(DEVICE)
 
-    train_loader, val_loader = setup_dataloaders(config, save_train_idxs=True)
+    train_loader, val_loader, test_loader = setup_dataloaders(config, save_train_idxs=True)
+    first_batch = next(iter(train_loader))
+    print(len(train_loader.dataset))  # 전체 샘플 개수
 
+    print("\nMONAI Transform이 적용된 배치 데이터 형태:")
+    print(f"  input: {first_batch[config['dataset']['modality'][0]].shape}")
+    print(f"  mask: {first_batch['mask'].shape}")
     num_channels_tuple = tuple(
         int(x) for x in config["vqvae"]["num_channels"].split(', ')
     )
@@ -159,24 +164,8 @@ def main(config):
                 modality = config["dataset"]["modality"][0]
                 data = batch_data[modality].to(device)
 
-            # sample = data[0, 0]  # (5, 128, 128)
-            # print(sample.shape)
-
-            # for i in range(5):
-            #     img = sample[i]
-            #     img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
-
-            #     print(f"Slice {i}: min={img.min().item():.4f}, max={img.max().item():.4f}")
-                
-            #     plt.subplot(1, 5, i+1)
-            #     plt.imshow(img_norm.cpu().numpy(), cmap='gray')
-            #     plt.title(f"Slice {i}")
-            #     plt.axis('off')
-
-            # plt.tight_layout()
-            # plt.show()
-
-            #pdb.set_trace()
+            if data.dim() == 4:  # (B, H, W, D)
+                data = data.unsqueeze(1)
             optimizer_g.zero_grad()
             with torch.amp.autocast("cuda", enabled=config["optim"]["amp"], dtype=torch.bfloat16):
                 # print("\n\n\nbatch_idx", batch_idx, "\n\n\n")
@@ -255,6 +244,8 @@ def main(config):
                     else:
                         modality = config["dataset"]["modality"][0]
                         data = batch_data[modality].to(device)
+                    if data.dim() == 4:  # (B, H, W, D)
+                        data = data.unsqueeze(1)
 
                     with torch.amp.autocast("cuda", enabled=config["optim"]["amp"], dtype=torch.bfloat16):
                         recon, _ = model(images=data)

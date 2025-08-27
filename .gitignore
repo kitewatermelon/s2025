@@ -7,3 +7,8 @@ __pycache__/
 synthRAD2025*/
 Val_Input/
 checkpoints/
+VAL/
+evaluation/
+ground_truth/
+results/
+logs/

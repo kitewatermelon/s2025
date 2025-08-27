@@ -27,6 +27,89 @@ import SimpleITK as sitk
 from monai.transforms import MapTransform
 from typing import Mapping, Hashable
 import numpy as np
+import torch
+import numpy as np
+from monai.transforms import MapTransform
+from typing import Mapping, Hashable
+import warnings
+
+class PadToMatchLongestSideD(MapTransform):
+    """
+    Pad 3D volumes (or 2D slices) so that all spatial dims match the longest side.
+    Saves the original shape and padding info for later restoration.
+    """
+    def __init__(self, keys, allow_missing_keys=False, mode="constant", value=0):
+        super().__init__(keys, allow_missing_keys)
+        self.mode = mode
+        self.value = value
+
+    def __call__(self, data: Mapping[Hashable, np.ndarray]):
+        d = dict(data)
+        for key in self.keys:
+            if key not in d:
+                continue
+            
+            img = d[key]
+            is_tensor = isinstance(img, torch.Tensor)
+            if not is_tensor:
+                img = torch.from_numpy(img)
+
+            spatial_shape = img.shape[-3:]  # (H, W, D)
+            max_dim = max(spatial_shape)
+
+            # target shape: cube with max_dim
+            target_shape = (max_dim, max_dim, max_dim)
+
+            # padding calculation
+            pads = []
+            for s, t in zip(spatial_shape[::-1], target_shape[::-1]):
+                total_pad = t - s
+                pad_before = total_pad // 2
+                pad_after = total_pad - pad_before
+                pads.extend([pad_before, pad_after])
+            pads = tuple(pads)  # PyTorch F.pad expects reversed order
+
+            img_padded = torch.nn.functional.pad(img, pads, mode="constant", value=self.value)
+
+            d[key] = img_padded if is_tensor else img_padded.numpy()
+            d[f"{key}_orig_shape"] = spatial_shape
+            d[f"{key}_pad_info"] = pads
+
+        return d
+
+
+class RemovePaddingD(MapTransform):
+    """
+    Remove padding applied by PadToMatchLongestSideD and restore original shape.
+    """
+    def __init__(self, keys, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+
+    def __call__(self, data: Mapping[Hashable, np.ndarray]):
+        d = dict(data)
+        for key in self.keys:
+            if key not in d:
+                continue
+
+            if f"{key}_orig_shape" not in d or f"{key}_pad_info" not in d:
+                warnings.warn(f"[WARN] No padding info found for key {key}. Skipping.")
+                continue
+
+            orig_shape = d[f"{key}_orig_shape"]
+            pads = d[f"{key}_pad_info"]
+
+            img = d[key]
+            is_tensor = isinstance(img, torch.Tensor)
+            if not is_tensor:
+                img = torch.from_numpy(img)
+
+            # remove padding
+            h, w, dpth = orig_shape
+            img_cropped = img[..., :h, :w, :dpth]
+
+            d[key] = img_cropped if is_tensor else img_cropped.numpy()
+
+        return d
 
 class SaveOriginalShapeD(MapTransform):
     """Save the original image shape before transformation"""
@@ -535,7 +618,7 @@ def setup_dataloaders(config: Dict, save_train_idxs=False):
         indices_path = os.path.join(exp_dir, 'dataset_indices.json')
         with open(indices_path, 'w') as f:
             json.dump(indices, f)
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 def setup_datasets(config: Dict):

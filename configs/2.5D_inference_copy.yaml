@@ -14,16 +14,16 @@ paths:
   
   ct_vqvae_config: "checkpoints/2.5D_ct_256/config.yaml"
   ct_vq_checkpoint: "checkpoints/2.5D_ct_256/model_1000.pt"
-
-
+  diffusion_checkpoint: "checkpoints/2.5D_vdm_256/model_37000.pt" 
+  
 optim:
   lr: 1e-4
   weight_decay: 0.01
 
 # denoise nn
 uvit:
-  img_size: 64
   # img_size: 32
+  img_size: 64
   patch_size: 2
   # in_chans: 1
   in_chans: 2
@@ -36,17 +36,18 @@ uvit:
 
 # Data settings for latent space
 dataset:
-  data_path: "synthRAD2025_Train_2.5D/Task2"
+  # data_path: "synthRAD2025_TEST/Task2"
+  # data_path: "synthRAD2025_Task2_Val_Input_D/Task2"
+  data_path: "synthRAD2025_Task2_Train/Task2"
   anatomy: 
     - "AB"
     - "HN"
     - "TH"   
   modality:
     - "cbct"
-    - "ct"  
+    # - "ct"  
   interpolate: True # ["brain"], ["brain", "pelvis"]
   interpolation_size: [256, 256]
-  # interpolation_size: [128, 128]
   train_batch_size: 6  # should be set to 1 for latent extraction
   val_batch_size: 6  # should be set  to 1 for latent extraction
   train_shuffle: True
@@ -71,7 +72,7 @@ noise_schedule: "learned_linear"
 antithetic_time_sampling: True
 use_fourier_features: False
 
-num_steps: 60_000
+num_steps: 100_000
 # save_and_eval_every: 1
 save_and_eval_every: 1000
 n_sample_steps: 200

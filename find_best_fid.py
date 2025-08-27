@@ -3,7 +3,7 @@ import json
 import glob
 
 # JSON 파일들이 있는 디렉토리 경로 (WSL 환경을 가정)
-directory_path = "/mnt/c/Users/Administrator/Desktop/synthrad2025-vardifformer/checkpoints/vdm_diffusion_separate_encoders_codebook-5"
+directory_path = "/mnt/c/Users/Administrator/Desktop/synthrad2025-vardifformer/checkpoints/2.5D_vdm_256"
 
 # 디렉토리 내의 모든 .json 파일 목록을 가져옵니다.
 json_files = glob.glob(os.path.join(directory_path, "*.json"))
