@@ -56,17 +56,17 @@ class ApplyMaskd(MapTransform):
 # 사용자 정의 데이터셋
 # -------------------------------
 class SlidingWindowPatchDataset(Dataset):
-    def __init__(self, root_dir: str, modality: str, subject_dirs: List[str] = None,
+    def __init__(self, root_dir: str, modality: List[str], subject_dirs: List[str] = None,
                  patch_size: Tuple[int, int, int] = (128, 128, 0), overlap: float = 0.5, transform=None):
         self.root_dir = root_dir
-        self.modality = modality.lower()
+        self.modality = [m.lower() for m in modality]
         self.patch_size = patch_size
         self.overlap = overlap
         self.transform = transform
         self.subject_dirs = subject_dirs
 
-        if self.modality not in ['ct', 'cbct']:
-            raise ValueError("modality는 'ct' 또는 'cbct'여야 합니다.")
+        if not all(m in ['ct', 'cbct'] for m in self.modality):
+            raise ValueError("modality는 'ct' 또는 'cbct' 리스트여야 합니다.")
         
         self.file_list = []
         self.data_cache = {}  # <--- 이미지 메모리에 캐싱
@@ -81,33 +81,40 @@ class SlidingWindowPatchDataset(Dataset):
                                      if os.path.isdir(os.path.join(task_dir, d))]
         
         for case_dir in self.subject_dirs:
-            input_path = os.path.join(case_dir, f'{self.modality}.mha')
-            mask_path = os.path.join(case_dir, 'mask.mha')
-            
-            if not (os.path.exists(input_path) and os.path.exists(mask_path)):
-                print(f"경고: {case_dir}에서 파일이 누락되었습니다. 이 케이스는 건너뜁니다.")
+            # 모든 모달리티 파일이 존재하는지 확인
+            files_exist = True
+            for m in self.modality:
+                if not os.path.exists(os.path.join(case_dir, f'{m}.mha')):
+                    print(f"경고: {case_dir}에서 {m}.mha 파일이 누락되었습니다. 이 케이스는 건너뜁니다.")
+                    files_exist = False
+                    break
+            if not files_exist or not os.path.exists(os.path.join(case_dir, 'mask.mha')):
                 continue
-            
-            # --- 캐싱: 파일을 numpy array로 미리 변환해 저장 ---
-            if input_path not in self.data_cache:
-                input_img = sitk.ReadImage(input_path)
-                mask_img = sitk.ReadImage(mask_path)
-                
-                input_array = sitk.GetArrayFromImage(input_img)
-                mask_array = sitk.GetArrayFromImage(mask_img)
 
-                # 전체 볼륨에 대한 정규화
-                a_min = -1024.
-                a_max = 3071.
-                b_min = 0.0
-                b_max = 1.0
-                input_array = np.clip(input_array, a_min, a_max)
-                input_array = ((input_array - a_min) / (a_max - a_min)) * (b_max - b_min) + b_min
-                
-                self.data_cache[input_path] = input_array
+            # 캐싱 및 정규화
+            for m in self.modality:
+                input_path = os.path.join(case_dir, f'{m}.mha')
+                if input_path not in self.data_cache:
+                    input_img = sitk.ReadImage(input_path)
+                    input_array = sitk.GetArrayFromImage(input_img)
+                    
+                    a_min = -1024.
+                    a_max = 3071.
+                    b_min = 0.0
+                    b_max = 1.0
+                    input_array = np.clip(input_array, a_min, a_max)
+                    input_array = ((input_array - a_min) / (a_max - a_min)) * (b_max - b_min) + b_min
+                    
+                    self.data_cache[input_path] = input_array
+            
+            mask_path = os.path.join(case_dir, 'mask.mha')
+            if mask_path not in self.data_cache:
+                mask_img = sitk.ReadImage(mask_path)
+                mask_array = sitk.GetArrayFromImage(mask_img)
                 self.data_cache[mask_path] = mask_array
             
-            input_array = self.data_cache[input_path]
+            # 패치 정보 생성
+            input_array = self.data_cache[os.path.join(case_dir, f'{self.modality[0]}.mha')]
             _, original_height, original_width = input_array.shape  # (D,H,W)
 
             target_width, target_height = self.patch_size[0], self.patch_size[1]
@@ -125,34 +132,38 @@ class SlidingWindowPatchDataset(Dataset):
                     if start_y + target_height > original_height:
                         start_y = original_height - target_height
                     
-                    self.file_list.append({
-                        self.modality: input_path,
+                    patch_dict = {
                         'mask': mask_path,
-                        'origin': (0, start_y, start_x),  # (z,y,x) 순서
+                        'origin': (0, start_y, start_x),
                         'size': (input_array.shape[0], target_height, target_width)
-                    })
+                    }
+                    for m in self.modality:
+                        patch_dict[m] = os.path.join(case_dir, f'{m}.mha')
+                    
+                    self.file_list.append(patch_dict)
 
     def __len__(self):
         return len(self.file_list)
 
     def __getitem__(self, idx):
         patch_info = self.file_list[idx]
-        input_array = self.data_cache[patch_info[self.modality]]
-        mask_array = self.data_cache[patch_info['mask']]
-
         z, y, x = patch_info['origin']
         dz, dy, dx = patch_info['size']
+        
+        data = {}
+        
+        # 각 모달리티 패치 추출 및 딕셔너리에 추가
+        for m in self.modality:
+            input_array = self.data_cache[patch_info[m]]
+            data[m] = input_array[z:z+dz, y:y+dy, x:x+dx]
+            
+        # 마스크 패치 추출 및 딕셔너리에 추가
+        mask_array = self.data_cache[patch_info['mask']]
+        data['mask'] = mask_array[z:z+dz, y:y+dy, x:x+dx]
 
-        # numpy 슬라이싱으로 패치 추출
-        input_patch = input_array[z:z+dz, y:y+dy, x:x+dx]
-        mask_patch  = mask_array[z:z+dz, y:y+dy, x:x+dx]
-
-        data = {
-            self.modality: input_patch,
-            'mask': mask_patch
-        }
         if self.transform:
             data = self.transform(data)
+        
         return data
 
 # -------------------------------
@@ -166,8 +177,6 @@ def setup_transforms(config: Dict):
     # 공통 트랜스폼: 채널 추가
     common_transforms = [
         ApplyMaskd(keys=image_keys, mask_key="mask"),
-        EnsureChannelFirstd(keys=all_keys),
-        EnsureTyped(keys=all_keys, dtype=torch.float),
     ]
     
     val_transf = Compose(common_transforms)
@@ -223,7 +232,7 @@ def setup_dataloaders(config: Dict, save_train_idxs=False):
         )
     
     # 훈련 데이터셋에서 1%만 무작위로 선택
-    num_samples = len(full_train_ds) // 100
+    num_samples = len(full_train_ds) // 10
     if num_samples < 1:
         warnings.warn("데이터셋 크기가 너무 작아 1% 샘플링이 불가능합니다. 전체 데이터셋을 사용합니다.")
         num_samples = len(full_train_ds)

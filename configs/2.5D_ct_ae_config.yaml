@@ -1,7 +1,7 @@
 default:
   random_seed:  42
   device: 0  # "cpu"
-  experiment_name: 2.5D_ct_PATCH
+  experiment_name: 2.5D_ct_PATCH_NORM
 
 optim:
   amp: True

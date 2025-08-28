@@ -60,9 +60,9 @@ class Trainer:
         diffusion_model,
         ae_model_ct,
         ae_model_cbct,
-        train_dataloader,
-        val_dataloader,
-        test_dataloader,
+        train_set,
+        val_set,
+        test_set,
         accelerator,
         optimizer,
         cfg,
@@ -81,9 +81,9 @@ class Trainer:
         self.diffusion_model = diffusion_model
         self.ae_model_ct = ae_model_ct
         self.ae_model_cbct = ae_model_cbct
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader,
-        self.test_dataloader = test_dataloader,
+        self.train_set = train_set
+        self.val_set = val_set,
+        self.test_set = test_set,
         self.accelerator = accelerator
         self.save_and_eval_every = save_and_eval_every
         self.num_samples = num_samples
@@ -107,6 +107,28 @@ class Trainer:
             self.experiment_dir.mkdir(exist_ok=True, parents=True)
             cfg.export_config_file(cfg.get_parsed_content(), os.path.join(self.experiment_dir, "config.yaml"), fmt="yaml")
             self.writer = SummaryWriter(self.experiment_dir, "tb")
+
+
+        def make_dataloader(dataset, limit_size=None, *, train=False):
+            if limit_size is not None:
+                dataset = Subset(dataset, range(limit_size))
+            dataloader = DeviceAwareDataLoader(
+                dataset,
+                cfg["dataset"]["train_batch_size"],
+                shuffle=train,
+                pin_memory=True,
+                num_workers=cfg["dataset"]["num_workers"],
+                drop_last=True,
+                device=accelerator.device if not train else None,  # None -> standard DL
+            )
+            if train:
+                dataloader = accelerator.prepare(dataloader)
+            return dataloader
+
+        self.train_dataloader = cycle(make_dataloader(train_set, train=True))
+        #self.train_dataloader = make_dataloader(train_set, train=True)
+        self.validation_dataloader = make_dataloader(val_set)
+        self.test_dataloader = make_dataloader(test_set, len(val_set))
 
         self.diffusion_model = accelerator.prepare(diffusion_model)
         self.opt = accelerator.prepare(optimizer)
@@ -520,15 +542,17 @@ def main(cfg):
     # Check if dataset indices file exists
     if not stage_1_idxs_file.exists():
         raise FileNotFoundError(f"Dataset indices file not found: {stage_1_idxs_file}")
-    train_dataloader, validation_dataloader, test_dataloader = setup_dataloaders(cfg, save_train_idxs=False)
+    train_dataset, val_dataset, test_dataset = setup_datasets_diffusion(cfg, stage_1_idxs_file)
 
+    train_loader, _ = setup_dataloaders(cfg, save_train_idxs=False)
 
-    check_data = next(iter(train_dataloader))
+    check_data = next(iter(train_loader))
 
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=True):
             z = ct_ae.encode_stage_2_inputs(check_data["ct"].to(device))
             z = z.squeeze(2)
+    del train_loader
 
     print(f"Codebook latent shape: {z.shape}")
     model = UViT(
@@ -563,9 +587,9 @@ def main(cfg):
         diffusion,
         ct_ae,
         cbct_ae,
-        train_dataloader,
-        validation_dataloader,
-        test_dataloader,
+        train_dataset,
+        val_dataset,
+        test_dataset,
         accelerator,
         optimizer,
         cfg,
