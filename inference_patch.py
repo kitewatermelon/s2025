@@ -36,6 +36,10 @@ class SlidingWindowMerger:
         dz, dy, dx = self.patch_size
         output_slice = self.output_volume[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx]
         weight_slice = self.weight_map[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx]
+        print("patch.shape:", patch.shape)
+        print("output_slice.shape:", output_slice.shape)
+        print("weight_slice.shape:", weight_slice.shape)
+        print("gaussian_weights.shape:", self.gaussian_weights.shape)
         patch_to_add = patch.squeeze() * self.gaussian_weights
         self.output_volume[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx] = output_slice + patch_to_add
         self.weight_map[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx] = weight_slice + self.gaussian_weights
@@ -202,6 +206,8 @@ def main(cfg):
         # 이 예제에서는 배치 내 패치들이 같은 환자에서 온다고 가정
         # 그렇지 않다면 환자별로 분리하여 처리해야 함
         for j in range(cbct_batch.shape[0]):
+            print("cbct_batch.shape:", cbct_batch.shape)
+            print("cbct_batch[j].shape:", cbct_batch[j].shape)
             five_slice_patch = cbct_batch[j].unsqueeze(0) # (1, 1, D, H, W)
             print(five_slice_patch.shape)
             if len(five_slice_patch.shape) == 4:
