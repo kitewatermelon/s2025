@@ -17,35 +17,35 @@ from models.lvdm.uvit_2d import UViT
 from models.lvdm.vdm_2_5d import VDM
 from models.lvdm.utils import init_logger
 
-# 이전 답변에서 제공된 SlidingWindowMerger 클래스를 여기에 포함하거나 별도 파일로 임포트
 class SlidingWindowMerger:
-    def __init__(self, original_shape, patch_size):
-        self.original_shape = original_shape
-        self.patch_size = patch_size
-        self.output_volume = torch.zeros(self.original_shape, dtype=torch.float32)
-        self.weight_map = torch.zeros(self.original_shape, dtype=torch.float32)
-        sigma = min(self.patch_size) / 6.0
-        weights_z = torch.exp(-((torch.arange(self.patch_size[0]) - (self.patch_size[0] - 1) / 2) ** 2) / (2 * sigma ** 2))
-        weights_y = torch.exp(-((torch.arange(self.patch_size[1]) - (self.patch_size[1] - 1) / 2) ** 2) / (2 * sigma ** 2))
-        weights_x = torch.exp(-((torch.arange(self.patch_size[2]) - (self.patch_size[2] - 1) / 2) ** 2) / (2 * sigma ** 2))
-        self.gaussian_weights = weights_z.unsqueeze(1).unsqueeze(2) * weights_y.unsqueeze(0).unsqueeze(2) * weights_x.unsqueeze(0).unsqueeze(1)
-        self.gaussian_weights = self.gaussian_weights.to(self.output_volume.device)
+    def __init__(self, volume_shape):
+        # volume_shape: (H, W)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.output_volume = torch.zeros(volume_shape, dtype=torch.float32, device=device)
+        self.weight_map = torch.zeros(volume_shape, dtype=torch.float32, device=device)
+
+        sigma = min(volume_shape) / 6.0
+        weights_y = torch.exp(-((torch.arange(volume_shape[0]) - (volume_shape[0] - 1) / 2) ** 2) / (2 * sigma ** 2))
+        weights_x = torch.exp(-((torch.arange(volume_shape[1]) - (volume_shape[1] - 1) / 2) ** 2) / (2 * sigma ** 2))
+        self.gaussian_weights = weights_y.unsqueeze(1) * weights_x.unsqueeze(0)
+        self.gaussian_weights = self.gaussian_weights.to(device)
+        print("gaussian_weights shape:", self.gaussian_weights.shape)
+        print("Initialized SlidingWindowMerger with volume shape:", volume_shape)
+        print("output_volume shape:", self.output_volume.shape)
+        print("weight_map shape:", self.weight_map.shape)
+
 
     def add_patch(self, patch, origin):
-        z_start, y_start, x_start = origin
-        dz, dy, dx = self.patch_size
-        output_slice = self.output_volume[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx]
-        weight_slice = self.weight_map[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx]
-        print("patch.shape:", patch.shape)
-        print("output_slice.shape:", output_slice.shape)
-        print("weight_slice.shape:", weight_slice.shape)
-        print("gaussian_weights.shape:", self.gaussian_weights.shape)
-        patch_to_add = patch.squeeze() * self.gaussian_weights
-        self.output_volume[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx] = output_slice + patch_to_add
-        self.weight_map[z_start:z_start+dz, y_start:y_start+dy, x_start:x_start+dx] = weight_slice + self.gaussian_weights
-        
+        y_start, x_start = origin[1], origin[2]
+        h, w = patch.shape
+        print("y_start, x_start:", y_start, x_start)
+        print("h, w:", h, w)
+        self.output_volume[y_start:y_start+h, x_start:x_start+w] += patch * self.gaussian_weights[:h, :w]
+        self.weight_map[y_start:y_start+h, x_start:x_start+w] += self.gaussian_weights[:h, :w]
+        print("ouput_volume shape:", self.output_volume.shape)
     def get_result(self):
         return self.output_volume / (self.weight_map + 1e-8)
+
 
 
 class Inferencer:
@@ -83,6 +83,19 @@ def save_fig(cbct_slice, generated_slice, output_dir, i):
     output_filename = os.path.join(output_dir, f"{i}.png")
     plt.savefig(output_filename, bbox_inches="tight", dpi=200)
     plt.close()
+def save_patch_fig(cbct_patch, generated_patch, output_dir, patch_idx):
+    """
+    CBCT 패치와 생성된 CT 패치를 나란히 시각화하여 저장
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    img_grid = make_grid([cbct_patch.unsqueeze(0), generated_patch.unsqueeze(0)], nrow=2, normalize=True)
+    plt.figure(figsize=(6, 6))
+    plt.axis("off")
+    plt.imshow(img_grid.permute(1, 2, 0).cpu().numpy(), cmap="gray")
+    plt.title(f"Patch {patch_idx}: Left=CBCT, Right=Generated CT")
+    plt.savefig(os.path.join(output_dir, f"patch_{patch_idx}.png"), bbox_inches="tight", dpi=200)
+    plt.close()
+
 
 def main(cfg):
     DEVICE = cfg["default"]["device"]
@@ -136,7 +149,7 @@ def main(cfg):
         raise FileNotFoundError(f"Dataset indices file not found: {stage_1_idxs_file}")
     
     # dataloader로 바로 받도록 수정
-    train_dl, val_dl, test_dl = setup_dataloaders(cfg, stage_1_idxs_file)
+    train_dl, val_dl, test_dl = setup_dataloaders(cfg, stage_1_idxs_file, True)
 
     check_data = next(iter(val_dl))
     check_data = check_data["ct"]
@@ -192,7 +205,7 @@ def main(cfg):
         subj_id = batch["subj_id"][0]
         mask_batch = mask_batch.to(device)
         origin = batch["origin"]
-
+        print(batch["cbct"].shape, batch["mask"].shape)
         print(f"Processing subject: {subj_id} with origin: {origin}")
         output_dir = f"/mnt/d/synthrad/TRAIN/{subj_id}"
         os.makedirs(output_dir, exist_ok=True)
@@ -202,11 +215,14 @@ def main(cfg):
         masked_first_two_slices = first_two_slices.to(device) * first_two_masks
         final_generated_slices.extend(list(masked_first_two_slices.unbind(dim=0)))
 
-        original_shape = tuple(batch["original_shape"][0].tolist())
-        patch_size = tuple(cbct_batch.shape[-3:]) # (D, H, W)
-        merger = SlidingWindowMerger(original_shape, patch_size)
+        original_shape = tuple(batch["original_shape"][0][1:])  # (H, W)
+        # patch_size: 2D patch 크기 (H, W)
+        patch_size = tuple(cbct_batch.shape[-2:])  # (H, W)
+        merger = SlidingWindowMerger(original_shape)
+
         
         for j in range(cbct_batch.shape[0]):
+            print(f"Processing patch {j+1}/{cbct_batch.shape[0]} for subject {subj_id}")
             five_slice_patch = cbct_batch[j].unsqueeze(0)
             if len(five_slice_patch.shape) == 4:
                 five_slice_patch = five_slice_patch.unsqueeze(1)
@@ -214,9 +230,14 @@ def main(cfg):
             generated_slice = generated_ct_patch[0, 0, 2, :, :]
             masked_generated_slice = generated_slice * mask_batch[j, :, :]
             final_generated_slices.append(masked_generated_slice)
-            
+            cbct_patch = five_slice_patch[0, 0, 2, :, :]
+
+    # 저장
+            save_patch_fig(cbct_patch, generated_slice, ".patch", j)
+
             origin = batch["origin"][j].tolist()
-            merger.add_patch(generated_ct_patch.squeeze(0).squeeze(0), origin)
+            merger.add_patch(generated_slice.squeeze(0).squeeze(0), origin)
+
         final_generated_volume = merger.get_result()
         last_two_slices = cbct_batch[-2:, :, :]
         last_two_masks = mask_batch[-2:, :, :]
@@ -227,14 +248,6 @@ def main(cfg):
         saver = SaveImage(output_dir=output_dir, output_postfix="generated", output_ext=".mha")
         saver(final_generated_volume.unsqueeze(0).unsqueeze(0))
         print(f"Generated volume saved to: {output_dir}/generated.mha")
-        
-        # 중간 슬라이스 시각화
-        mid_slice_idx = final_generated_volume.shape[0] // 2
-        generated_slice = final_generated_volume[mid_slice_idx, :, :]
-        cbct_slice = batch["cbct"][0].squeeze(0)[mid_slice_idx, :, :]
-        
-        save_fig(cbct_slice, generated_slice, f"/mnt/d/synthrad/inference/{subj_id}", mid_slice_idx)
-        print(f"Visualization saved for subject {subj_id}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start inference")

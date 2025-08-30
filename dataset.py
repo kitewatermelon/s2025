@@ -139,7 +139,6 @@ class SlidingWindowPatchDataset(Dataset):
                         'original_shape': (input_array.shape[0], original_height, original_width),
                         'subj_id': os.path.basename(case_dir)
                     }
-                    print(patch_dict)
                     for m in self.modality:
                         patch_dict[m] = os.path.join(case_dir, f'{m}.mha')
                     
@@ -204,83 +203,49 @@ def setup_transforms(config: Dict):
 # -------------------------------
 # Dataset + Loader setups
 # -------------------------------
-def setup_dataloaders(config: Dict, save_train_idxs=False):
-    """
-    SlidingWindowPatchDataset을 사용하여 데이터셋과 데이터로더를 설정합니다.
-    """
+def setup_dataloaders(config: Dict, save_train_idxs=False, inference_mode=False):
     data_path = pathlib.Path(config["dataset"]["data_path"])
     anatomy_list = [anat.upper() for anat in config["dataset"]["anatomy"]]
-    
+
     all_subjects = []
     for anat in anatomy_list:
         anat_path = data_path / anat
         if not anat_path.exists():
             continue
         all_subjects.extend([str(p) for p in anat_path.glob('*') if p.is_dir()])
-        
+    
     df = pd.DataFrame({"subject_path": all_subjects})
-    
-    train_df, temp_df = train_test_split(df, test_size=.3, random_state=config["default"]["random_seed"])
-    val_df, test_df = train_test_split(temp_df, test_size=.60, random_state=config["default"]["random_seed"])
-    
+
+    if inference_mode:
+        # inference 모드: 전체를 20개로 제한하고 14:3:3으로 나누기
+        if len(df) > 20:
+            df = df.sample(20, random_state=config["default"]["random_seed"])
+        train_df = df.iloc[:14]
+        val_df = df.iloc[14:17]
+        test_df = df.iloc[17:]
+    else:
+        train_df, temp_df = train_test_split(df, test_size=.3, random_state=config["default"]["random_seed"])
+        val_df, test_df = train_test_split(temp_df, test_size=.60, random_state=config["default"]["random_seed"])
+
     train_subjects = train_df["subject_path"].tolist()
     val_subjects = val_df["subject_path"].tolist()
     test_subjects = test_df["subject_path"].tolist()
 
     train_transf, val_transf = setup_transforms(config)
 
-    # 전체 훈련 데이터셋 생성
-    full_train_ds = SlidingWindowPatchDataset(
-        root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"],
-        subject_dirs=train_subjects,
-        patch_size=tuple(config["dataset"]["patch_size"]),
-        overlap=config["dataset"]["overlap"],
-        transform=train_transf     
-    )
-    
-    # 훈련 데이터셋에서 1/10 샘플링
-    num_samples = len(full_train_ds) // 10
-    if num_samples < 1:
-        warnings.warn("훈련 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
-        num_samples = len(full_train_ds)
-    subset_indices = random.sample(range(len(full_train_ds)), num_samples)
-    train_ds = Subset(full_train_ds, subset_indices)
-    print(f"훈련 데이터셋: {len(full_train_ds)}개 패치 중 {len(train_ds)}개 사용")
+    def make_dataset(subjects, transform):
+        return SlidingWindowPatchDataset(
+            root_dir=config["dataset"]["data_path"],
+            modality=config["dataset"]["modality"],
+            subject_dirs=subjects,
+            patch_size=tuple(config["dataset"]["patch_size"]),
+            overlap=config["dataset"]["overlap"],
+            transform=transform
+        )
 
-    # 검증 데이터셋 생성
-    full_val_ds = SlidingWindowPatchDataset(
-        root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"],
-        subject_dirs=val_subjects,
-        patch_size=tuple(config["dataset"]["patch_size"]),
-        overlap=config["dataset"]["overlap"],
-        transform=val_transf     
-    )
-    num_samples = len(full_val_ds) // 10
-    if num_samples < 1:
-        warnings.warn("검증 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
-        num_samples = len(full_val_ds)
-    subset_indices = random.sample(range(len(full_val_ds)), num_samples)
-    val_ds = Subset(full_val_ds, subset_indices)
-    print(f"검증 데이터셋: {len(full_val_ds)}개 패치 중 {len(val_ds)}개 사용")
-
-    # 테스트 데이터셋 생성
-    full_test_ds = SlidingWindowPatchDataset(
-        root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"],
-        subject_dirs=test_subjects,
-        patch_size=tuple(config["dataset"]["patch_size"]),
-        overlap=config["dataset"]["overlap"],
-        transform=val_transf,
-    )
-    num_samples = len(full_test_ds) // 10
-    if num_samples < 1:
-        warnings.warn("테스트 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
-        num_samples = len(full_test_ds)
-    subset_indices = random.sample(range(len(full_test_ds)), num_samples)
-    test_ds = Subset(full_test_ds, subset_indices)
-    print(f"테스트 데이터셋: {len(full_test_ds)}개 패치 중 {len(test_ds)}개 사용")
+    train_ds = make_dataset(train_subjects, train_transf)
+    val_ds = make_dataset(val_subjects, val_transf)
+    test_ds = make_dataset(test_subjects, val_transf)
 
     train_loader = DataLoader(
         train_ds, batch_size=config["dataset"]["train_batch_size"],
@@ -312,7 +277,9 @@ def setup_dataloaders(config: Dict, save_train_idxs=False):
         os.makedirs(exp_dir, exist_ok=True)
         with open(os.path.join(exp_dir, 'dataset_indices.json'), 'w') as f:
             json.dump(indices, f)
+
     print(f"훈련 데이터로더 배치 수: {len(train_loader)}")
     print(f"검증 데이터로더 배치 수: {len(val_loader)}")
     print(f"테스트 데이터로더 배치 수: {len(test_loader)}")
+    
     return train_loader, val_loader, test_loader

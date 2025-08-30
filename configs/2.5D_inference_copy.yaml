@@ -52,8 +52,8 @@ dataset:
   interpolation_size: [128, 128]
   patch_size: [128, 128]
   overlap: 0.25
-  train_batch_size: 6  # should be set to 1 for latent extraction
-  val_batch_size: 6  # should be set  to 1 for latent extraction
+  train_batch_size: 1 # should be set to 1 for latent extraction
+  val_batch_size: 1  # should be set  to 1 for latent extraction
   train_shuffle: True
   val_shuffle: False
   num_workers: 6
