@@ -135,8 +135,10 @@ class SlidingWindowPatchDataset(Dataset):
                     patch_dict = {
                         'mask': mask_path,
                         'origin': (0, start_y, start_x),
-                        'size': (input_array.shape[0], target_height, target_width)
+                        'size': (input_array.shape[0], target_height, target_width),
+                        'subj_id': case_dir
                     }
+                    print(patch_dict)
                     for m in self.modality:
                         patch_dict[m] = os.path.join(case_dir, f'{m}.mha')
                     
