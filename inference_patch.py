@@ -190,34 +190,39 @@ def main(cfg):
         cbct_batch = batch["cbct"].to(device)
         mask_batch = batch["mask"].to(device)
         subj_id = batch["subj_id"][0]
+        mask_batch = mask_batch.to(device)
         origin = batch["origin"]
 
         print(f"Processing subject: {subj_id} with origin: {origin}")
         output_dir = f"/mnt/d/synthrad/TRAIN/{subj_id}"
         os.makedirs(output_dir, exist_ok=True)
-        
-        # SlidingWindowMerger 초기화
-        # MONAI dataloader가 원본 shape 정보를 제공한다고 가정
+        final_generated_slices = []
+        first_two_slices = cbct_batch[:2, :, :]
+        first_two_masks = mask_batch[:2, :, :]
+        masked_first_two_slices = first_two_slices.to(device) * first_two_masks
+        final_generated_slices.extend(list(masked_first_two_slices.unbind(dim=0)))
+
         original_shape = tuple(batch["original_shape"][0].tolist())
         patch_size = tuple(cbct_batch.shape[-3:]) # (D, H, W)
         merger = SlidingWindowMerger(original_shape, patch_size)
         
-        # 배치 단위로 추론 실행
-        # 이 예제에서는 배치 내 패치들이 같은 환자에서 온다고 가정
-        # 그렇지 않다면 환자별로 분리하여 처리해야 함
         for j in range(cbct_batch.shape[0]):
-            print("cbct_batch.shape:", cbct_batch.shape)
-            print("cbct_batch[j].shape:", cbct_batch[j].shape)
-            five_slice_patch = cbct_batch[j].unsqueeze(0) # (1, 1, D, H, W)
-            print(five_slice_patch.shape)
+            five_slice_patch = cbct_batch[j].unsqueeze(0)
             if len(five_slice_patch.shape) == 4:
                 five_slice_patch = five_slice_patch.unsqueeze(1)
             generated_ct_patch = inferencer.sample_from_cbct(five_slice_patch, n_sample_steps=20)
-            print(batch["origin"][j])
-            origin = batch["origin"][j].tolist()  # 이제 [z,y,x] 됨
+            generated_slice = generated_ct_patch[0, 0, 2, :, :]
+            masked_generated_slice = generated_slice * mask_batch[j, :, :]
+            final_generated_slices.append(masked_generated_slice)
+            
+            origin = batch["origin"][j].tolist()
             merger.add_patch(generated_ct_patch.squeeze(0).squeeze(0), origin)
         final_generated_volume = merger.get_result()
-        
+        last_two_slices = cbct_batch[-2:, :, :]
+        last_two_masks = mask_batch[-2:, :, :]
+        masked_last_two_slices = last_two_slices.to(device) * last_two_masks
+        final_generated_slices.extend(list(masked_last_two_slices.unbind(dim=0)))
+
         # 3D 볼륨 저장
         saver = SaveImage(output_dir=output_dir, output_postfix="generated", output_ext=".mha")
         saver(final_generated_volume.unsqueeze(0).unsqueeze(0))
