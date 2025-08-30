@@ -59,12 +59,12 @@ class SlidingWindowPatchDataset(Dataset):
     def __init__(self, root_dir: str, modality: List[str], subject_dirs: List[str] = None,
                  patch_size: Tuple[int, int, int] = (128, 128, 0), overlap: float = 0.5, transform=None):
         self.root_dir = root_dir
-        self.modality = [m.lower() for m in modality]
+        self.modality = modality
         self.patch_size = patch_size
         self.overlap = overlap
         self.transform = transform
         self.subject_dirs = subject_dirs
-
+        print(self.modality)
         if not all(m in ['ct', 'cbct'] for m in self.modality):
             raise ValueError("modality는 'ct' 또는 'cbct' 리스트여야 합니다.")
         
@@ -163,7 +163,7 @@ class SlidingWindowPatchDataset(Dataset):
 
         if self.transform:
             data = self.transform(data)
-        
+        # print(data['ct'].shape, data['cbct'].shape, data['mask'].shape)
         return data
 
 # -------------------------------
@@ -221,43 +221,58 @@ def setup_dataloaders(config: Dict, save_train_idxs=False):
 
     train_transf, val_transf = setup_transforms(config)
 
-    # 전체 훈련 데이터셋을 먼저 생성
+    # 전체 훈련 데이터셋 생성
     full_train_ds = SlidingWindowPatchDataset(
         root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"][0],
+        modality=config["dataset"]["modality"],
         subject_dirs=train_subjects,
         patch_size=tuple(config["dataset"]["patch_size"]),
         overlap=config["dataset"]["overlap"],
         transform=train_transf     
-        )
+    )
     
-    # 훈련 데이터셋에서 1%만 무작위로 선택
+    # 훈련 데이터셋에서 1/10 샘플링
     num_samples = len(full_train_ds) // 10
     if num_samples < 1:
-        warnings.warn("데이터셋 크기가 너무 작아 1% 샘플링이 불가능합니다. 전체 데이터셋을 사용합니다.")
+        warnings.warn("훈련 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
         num_samples = len(full_train_ds)
-        
     subset_indices = random.sample(range(len(full_train_ds)), num_samples)
     train_ds = Subset(full_train_ds, subset_indices)
-    print(f"훈련 데이터셋: {len(full_train_ds)}개 패치 중 {len(train_ds)}개 ({num_samples}) 패치 사용")
+    print(f"훈련 데이터셋: {len(full_train_ds)}개 패치 중 {len(train_ds)}개 사용")
 
-    # 검증/테스트 데이터셋 생성 (전체 사용)
-    val_ds = SlidingWindowPatchDataset(
+    # 검증 데이터셋 생성
+    full_val_ds = SlidingWindowPatchDataset(
         root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"][0],
+        modality=config["dataset"]["modality"],
         subject_dirs=val_subjects,
         patch_size=tuple(config["dataset"]["patch_size"]),
         overlap=config["dataset"]["overlap"],
         transform=val_transf     
-        )
-    test_ds = SlidingWindowPatchDataset(
+    )
+    num_samples = len(full_val_ds) // 10
+    if num_samples < 1:
+        warnings.warn("검증 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
+        num_samples = len(full_val_ds)
+    subset_indices = random.sample(range(len(full_val_ds)), num_samples)
+    val_ds = Subset(full_val_ds, subset_indices)
+    print(f"검증 데이터셋: {len(full_val_ds)}개 패치 중 {len(val_ds)}개 사용")
+
+    # 테스트 데이터셋 생성
+    full_test_ds = SlidingWindowPatchDataset(
         root_dir=config["dataset"]["data_path"],
-        modality=config["dataset"]["modality"][0],
+        modality=config["dataset"]["modality"],
         subject_dirs=test_subjects,
         patch_size=tuple(config["dataset"]["patch_size"]),
         overlap=config["dataset"]["overlap"],
         transform=val_transf,
-        )
+    )
+    num_samples = len(full_test_ds) // 10
+    if num_samples < 1:
+        warnings.warn("테스트 데이터셋 크기가 너무 작아 서브샘플링 불가 → 전체 사용")
+        num_samples = len(full_test_ds)
+    subset_indices = random.sample(range(len(full_test_ds)), num_samples)
+    test_ds = Subset(full_test_ds, subset_indices)
+    print(f"테스트 데이터셋: {len(full_test_ds)}개 패치 중 {len(test_ds)}개 사용")
 
     train_loader = DataLoader(
         train_ds, batch_size=config["dataset"]["train_batch_size"],
@@ -285,9 +300,11 @@ def setup_dataloaders(config: Dict, save_train_idxs=False):
             'validation': val_subjects,
             'test': test_subjects
         }
-        exp_dir = os.path.join(config["optim"]["checkpoint_dir"], config['default']['experiment_name'])
+        exp_dir = os.path.join(config["default"]["checkpoint_dir"], config['default']['experiment_name'])
         os.makedirs(exp_dir, exist_ok=True)
         with open(os.path.join(exp_dir, 'dataset_indices.json'), 'w') as f:
             json.dump(indices, f)
-
+    print(f"훈련 데이터로더 배치 수: {len(train_loader)}")
+    print(f"검증 데이터로더 배치 수: {len(val_loader)}")
+    print(f"테스트 데이터로더 배치 수: {len(test_loader)}")
     return train_loader, val_loader, test_loader

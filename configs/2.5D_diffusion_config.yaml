@@ -1,6 +1,6 @@
 # Default settings
 default:
-  experiment_name: "2.5D_vdm_256"  # Updated name to reflect changes
+  experiment_name: "2.5D_vdm_PATCH_NORM"  # Updated name to reflect changes
   make_logs: True
   device: 0  # GPU device ID
   random_seed: 42
@@ -9,11 +9,11 @@ default:
 
 # Paths
 paths:
-  cbct_vqvae_config: "checkpoints/2.5D_cbct_256/config.yaml"
-  cbct_vq_checkpoint: "checkpoints/2.5D_cbct_256/model_1000.pt"
+  cbct_vqvae_config: "checkpoints/2.5D_cbct_PATCH_NORM/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/2.5D_cbct_PATCH_NORM/model_1000.pt"
   
-  ct_vqvae_config: "checkpoints/2.5D_ct_256/config.yaml"
-  ct_vq_checkpoint: "checkpoints/2.5D_ct_256/model_1000.pt"
+  ct_vqvae_config: "checkpoints/2.5D_ct_PATCH_NORM/config.yaml"
+  ct_vq_checkpoint: "checkpoints/2.5D_ct_PATCH_NORM/model_1000.pt"
 
 
 optim:
@@ -22,8 +22,8 @@ optim:
 
 # denoise nn
 uvit:
-  img_size: 64
-  # img_size: 32
+  # img_size: 64
+  img_size: 32
   patch_size: 2
   # in_chans: 1
   in_chans: 2
@@ -45,8 +45,10 @@ dataset:
     - "cbct"
     - "ct"  
   interpolate: True # ["brain"], ["brain", "pelvis"]
-  interpolation_size: [256, 256]
-  # interpolation_size: [128, 128]
+  # interpolation_size: [256, 256]
+  interpolation_size: [128, 128]
+  patch_size: [128, 128]
+  overlap: 0.25
   train_batch_size: 6  # should be set to 1 for latent extraction
   val_batch_size: 6  # should be set  to 1 for latent extraction
   train_shuffle: True

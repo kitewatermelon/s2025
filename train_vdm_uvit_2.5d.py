@@ -23,7 +23,7 @@ import numpy as np
 
 
 from monai.networks.nets import VQVAE
-from dataset import setup_datasets_diffusion, setup_dataloaders
+from dataset import setup_dataloaders
 import pdb
 
 import json, matplotlib.pyplot as plt
@@ -82,8 +82,8 @@ class Trainer:
         self.ae_model_ct = ae_model_ct
         self.ae_model_cbct = ae_model_cbct
         self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader,
-        self.test_dataloader = test_dataloader,
+        self.validation_dataloader = val_dataloader
+        self.test_dataloader = test_dataloader
         self.accelerator = accelerator
         self.save_and_eval_every = save_and_eval_every
         self.num_samples = num_samples
@@ -96,7 +96,9 @@ class Trainer:
         self.writer = None
         
         experiment_name = cfg["default"]["experiment_name"]
-        
+        DEVICE = self.cfg["default"]["device"]
+        self.device = torch.device(DEVICE)
+
         if cfg["default"]["make_logs"]:
             if "experiment_name" in cfg.default.keys():
                 experiment_name = cfg["default"]["experiment_name"]
@@ -112,51 +114,50 @@ class Trainer:
         self.opt = accelerator.prepare(optimizer)
         
     def train(self):
-        # Create a single progress bar for steps
         with tqdm(
-            range(self.num_steps),
+            total=self.num_steps,               # 전체 step 개수
             desc="Training",
             disable=not self.accelerator.is_main_process,
         ) as pbar:
-            while self.step < self.num_steps:
-                # Get next batch using next()
-                data = next(self.train_dataloader)
-                cbct_img, ct_img = data["cbct"], data["ct"]
-                with torch.no_grad():
-                    z = self.ae_model_ct.encode_stage_2_inputs(ct_img)            
-                    z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img)
-                    # print(z.shape, z_cond.shape)
-                    z = z.squeeze(2)
-                    z_cond = z_cond.squeeze(2)
-                    # cbct_img = cbct_img[:, :, 2, :, :] 
-                    # ct_img  = ct_img[:, :, 2, :, :] 
-                    # print(z.shape, z_cond.shape, ct_img.shape, cbct_img.shape)
+            while self.step < self.num_steps:   # 원하는 step까지 반복
+                for data in self.train_dataloader:
+                    cbct_img, ct_img = data["cbct"].to(self.device), data["ct"].to(self.device)
+                    if cbct_img.dim() == 4:
+                        cbct_img = cbct_img.unsqueeze(1)
+                    if ct_img.dim() == 4:
+                        ct_img = ct_img.unsqueeze(1)
 
-                self.opt.zero_grad()
-                loss, metrics_tr = self.diffusion_model(z, z_cond, ct_img)
-                self.accelerator.backward(loss)
-                self.opt.step()
-                pbar.set_description(f"loss: {loss.item():.4f}")
-                
-                self.step += 1
-                self.accelerator.wait_for_everyone()
-                
-                if self.accelerator.is_main_process:
-                    if hasattr(self, 'ema'):
-                        self.ema.update()      
-                    if self.step % self.save_and_eval_every == 0:
-                        #pdb.set_trace()
-                        self.validation()
-                        self.eval()
-                        print(f"Completed step {self.step}/{self.num_steps}")
-                pbar.update()
-                #pdb.set_trace()
+                    with torch.no_grad():
+                        z = self.ae_model_ct.encode_stage_2_inputs(ct_img)
+                        z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img)
+                        z = z.squeeze(2)
+                        z_cond = z_cond.squeeze(2)
 
-                if self.step % 100 == 0:
-                    self.writer.add_scalar("train/diff_loss", metrics_tr["diff_loss"].item(), self.step)
-                    self.writer.add_scalar("train/latent_loss", metrics_tr["latent_loss"].item(), self.step)
-                    self.writer.add_scalar("train/recon_loss", metrics_tr["recon_loss"].item(), self.step)
+                    self.opt.zero_grad()
+                    loss, metrics_tr = self.diffusion_model(z, z_cond, ct_img)
+                    self.accelerator.backward(loss)
+                    self.opt.step()
 
+                    self.step += 1
+                    pbar.set_description(f"loss: {loss.item():.4f}")
+                    pbar.update(1)   # 매 step마다 진행률 업데이트
+                    self.accelerator.wait_for_everyone()
+
+                    if self.accelerator.is_main_process:
+                        if hasattr(self, 'ema'):
+                            self.ema.update()
+                        if self.step % self.save_and_eval_every == 0:
+                            self.validation()
+                            self.eval()
+                            print(f"Completed step {self.step}/{self.num_steps}")
+
+                    if self.step % 100 == 0:
+                        self.writer.add_scalar("train/diff_loss", metrics_tr["diff_loss"].item(), self.step)
+                        self.writer.add_scalar("train/latent_loss", metrics_tr["latent_loss"].item(), self.step)
+                        self.writer.add_scalar("train/recon_loss", metrics_tr["recon_loss"].item(), self.step)
+
+                    if self.step >= self.num_steps:  # 다 돌면 종료
+                        return
 
     def validation(self):
         """Evaluate the model by sampling from the diffusion process and calculating metrics."""
@@ -178,8 +179,13 @@ class Trainer:
         with torch.no_grad():
             # Process validation set in batches
             for data in self.validation_dataloader:
-                cbct_img, ct_img = data["cbct"], data["ct"]
-                
+                print(data)
+                cbct_img, ct_img = data["cbct"].to(self.device), data["ct"].to(self.device)
+                if cbct_img.dim() == 4:  # (B, H, W, D)
+                    cbct_img = cbct_img.unsqueeze(1)
+                if ct_img.dim() == 4:  # (B, H, W, D)
+                    ct_img = ct_img.unsqueeze(1)
+
                 z_target = self.ae_model_ct.encode_stage_2_inputs(ct_img)
                 z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img)
                 z_target = z_target.squeeze(2)
@@ -279,7 +285,11 @@ class Trainer:
 
         # ─── loop through the test set ────────────────────────────────────────────
         for batch in self.test_dataloader:
-            cbct, ct_gt = batch["cbct"], batch["ct"]
+            cbct, ct_gt = batch["cbct"].to(self.device), batch["ct"].to(self.device)
+            if cbct.dim() == 4:  # (B, H, W, D)
+                cbct = cbct.unsqueeze(1)
+            if ct_gt.dim() == 4:  # (B, H, W, D)
+                ct_gt = ct_gt.unsqueeze(1)
 
             with torch.no_grad():
                 z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct)
@@ -523,11 +533,13 @@ def main(cfg):
     train_dataloader, validation_dataloader, test_dataloader = setup_dataloaders(cfg, save_train_idxs=False)
 
 
-    check_data = next(iter(train_dataloader))
-
+    check_data = next(iter(validation_dataloader))
+    check_data = check_data["ct"]
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=True):
-            z = ct_ae.encode_stage_2_inputs(check_data["ct"].to(device))
+            if check_data.dim() == 4:  # (B, H, W, D)
+                check_data = check_data.unsqueeze(1)
+            z = ct_ae.encode_stage_2_inputs(check_data.to(device))
             z = z.squeeze(2)
 
     print(f"Codebook latent shape: {z.shape}")
