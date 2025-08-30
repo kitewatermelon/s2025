@@ -186,13 +186,15 @@ def main(cfg):
         cbct_batch = batch["cbct"].to(device)
         mask_batch = batch["mask"].to(device)
         subj_id = batch["subj_id"][0]
-        
+        origin = batch["origin"]
+
+        print(f"Processing subject: {subj_id} with origin: {origin}")
         output_dir = f"/mnt/d/synthrad/TRAIN/{subj_id}"
         os.makedirs(output_dir, exist_ok=True)
         
         # SlidingWindowMerger 초기화
         # MONAI dataloader가 원본 shape 정보를 제공한다고 가정
-        original_shape = tuple(batch["cbct_original_shape"][0].tolist())
+        original_shape = tuple(batch["original_shape"][0].tolist())
         patch_size = tuple(cbct_batch.shape[-3:]) # (D, H, W)
         merger = SlidingWindowMerger(original_shape, patch_size)
         
@@ -201,17 +203,13 @@ def main(cfg):
         # 그렇지 않다면 환자별로 분리하여 처리해야 함
         for j in range(cbct_batch.shape[0]):
             five_slice_patch = cbct_batch[j].unsqueeze(0) # (1, 1, D, H, W)
+            print(five_slice_patch.shape)
+            if len(five_slice_patch.shape) == 4:
+                five_slice_patch = five_slice_patch.unsqueeze(1)
             generated_ct_patch = inferencer.sample_from_cbct(five_slice_patch, n_sample_steps=20)
-            
-            # 여기서 generated_ct_patch는 (1, 1, D, H, W) 형태이므로
-            # 병합기에 추가할 패치를 (D, H, W) 형태로 만들어야 함
-            # 그리고 각 패치의 원본 위치(origin)도 알아야 함
-            # 현재 코드에서는 dataloader가 origin을 제공하지 않으므로,
-            # 이 부분을 `dataset_2_5d.py`에서 수정해야 합니다.
-            # 임시로 더미 origin을 사용합니다.
-            origin = (0, 0, 0) # 이 부분은 실제 origin 정보로 대체해야 함
+            print(batch["origin"][j])
+            origin = batch["origin"][j].tolist()  # 이제 [z,y,x] 됨
             merger.add_patch(generated_ct_patch.squeeze(0).squeeze(0), origin)
-            
         final_generated_volume = merger.get_result()
         
         # 3D 볼륨 저장
@@ -222,7 +220,7 @@ def main(cfg):
         # 중간 슬라이스 시각화
         mid_slice_idx = final_generated_volume.shape[0] // 2
         generated_slice = final_generated_volume[mid_slice_idx, :, :]
-        cbct_slice = batch["cbct_original"][0].squeeze(0)[mid_slice_idx, :, :]
+        cbct_slice = batch["cbct"][0].squeeze(0)[mid_slice_idx, :, :]
         
         save_fig(cbct_slice, generated_slice, f"/mnt/d/synthrad/inference/{subj_id}", mid_slice_idx)
         print(f"Visualization saved for subject {subj_id}")

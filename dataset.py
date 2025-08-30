@@ -136,7 +136,8 @@ class SlidingWindowPatchDataset(Dataset):
                         'mask': mask_path,
                         'origin': (0, start_y, start_x),
                         'size': (input_array.shape[0], target_height, target_width),
-                        'subj_id': case_dir
+                        'original_shape': (input_array.shape[0], original_height, original_width),
+                        'subj_id': os.path.basename(case_dir)
                     }
                     print(patch_dict)
                     for m in self.modality:
@@ -151,8 +152,13 @@ class SlidingWindowPatchDataset(Dataset):
         patch_info = self.file_list[idx]
         z, y, x = patch_info['origin']
         dz, dy, dx = patch_info['size']
-        
         data = {}
+        data["origin"] = torch.tensor(patch_info['origin'], dtype=torch.int32)
+        data["size"] = torch.tensor(patch_info['size'], dtype=torch.int32)
+        data["original_shape"] = torch.tensor(patch_info['original_shape'], dtype=torch.int32)
+        data["subj_id"] = patch_info['subj_id']
+
+        
         
         # 각 모달리티 패치 추출 및 딕셔너리에 추가
         for m in self.modality:
