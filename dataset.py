@@ -283,3 +283,59 @@ def setup_dataloaders(config: Dict, save_train_idxs=False, inference_mode=False)
     print(f"테스트 데이터로더 배치 수: {len(test_loader)}")
     
     return train_loader, val_loader, test_loader
+
+
+from torch.utils.data import DataLoader, Sampler
+
+class PatientBatchSampler(Sampler):
+    """환자별로 패치 인덱스를 묶어 배치를 반환하는 Sampler"""
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.subject_to_indices = {}
+        for idx, patch_info in enumerate(dataset.file_list):
+            subj = patch_info['subj_id']
+            if subj not in self.subject_to_indices:
+                self.subject_to_indices[subj] = []
+            self.subject_to_indices[subj].append(idx)
+        self.subjects = list(self.subject_to_indices.keys())
+
+    def __iter__(self):
+        for subj in self.subjects:
+            yield self.subject_to_indices[subj]
+
+    def __len__(self):
+        return len(self.subjects)
+
+
+def setup_inference_dataloaders(config: Dict):
+    """Inference 전용 데이터로더: 한 배치에 한 환자의 모든 패치"""
+    data_path = pathlib.Path(config["dataset"]["data_path"])
+    anatomy_list = [anat.upper() for anat in config["dataset"]["anatomy"]]
+
+    all_subjects = []
+    for anat in anatomy_list:
+        anat_path = data_path / anat
+        if not anat_path.exists():
+            continue
+        all_subjects.extend([str(p) for p in anat_path.glob('*') if p.is_dir()])
+
+    subjects = all_subjects
+    val_transf = setup_transforms(config)[1]  # validation transform
+
+    test_ds = SlidingWindowPatchDataset(
+        root_dir=config["dataset"]["data_path"],
+        modality=config["dataset"]["modality"],
+        subject_dirs=subjects,
+        patch_size=tuple(config["dataset"]["patch_size"]),
+        overlap=config["dataset"]["overlap"],
+        transform=val_transf
+    )
+
+    test_loader = DataLoader(
+        test_ds,
+        batch_sampler=PatientBatchSampler(test_ds),
+        num_workers=config["dataset"]["num_workers"]
+    )
+
+    print(f"Inference 데이터로더 (환자 단위) 배치 수: {len(test_loader)}")
+    return test_loader

@@ -12,7 +12,7 @@ from monai.data import DataLoader
 
 from accelerate import Accelerator
 from torchvision.utils import make_grid
-from dataset import setup_dataloaders # dataset_2_5d.py에 dataloader를 반환하는 함수가 있다고 가정
+from dataset import setup_inference_dataloaders # dataset_2_5d.py에 dataloader를 반환하는 함수가 있다고 가정
 from models.lvdm.uvit_2d import UViT
 from models.lvdm.vdm_2_5d import VDM
 from models.lvdm.utils import init_logger
@@ -24,7 +24,8 @@ class SlidingWindowMerger:
         self.output_volume = torch.zeros(volume_shape, dtype=torch.float32, device=device)
         self.weight_map = torch.zeros(volume_shape, dtype=torch.float32, device=device)
 
-        sigma = min(volume_shape) / 6.0
+        sigma = min(volume_shape) / 2
+        print("sigma:", sigma)
         weights_y = torch.exp(-((torch.arange(volume_shape[0]) - (volume_shape[0] - 1) / 2) ** 2) / (2 * sigma ** 2))
         weights_x = torch.exp(-((torch.arange(volume_shape[1]) - (volume_shape[1] - 1) / 2) ** 2) / (2 * sigma ** 2))
         self.gaussian_weights = weights_y.unsqueeze(1) * weights_x.unsqueeze(0)
@@ -149,9 +150,9 @@ def main(cfg):
         raise FileNotFoundError(f"Dataset indices file not found: {stage_1_idxs_file}")
     
     # dataloader로 바로 받도록 수정
-    train_dl, val_dl, test_dl = setup_dataloaders(cfg, stage_1_idxs_file, True)
+    test_dl = setup_inference_dataloaders(cfg)
 
-    check_data = next(iter(val_dl))
+    check_data = next(iter(test_dl))
     check_data = check_data["ct"]
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=True):
