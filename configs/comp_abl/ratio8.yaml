@@ -38,7 +38,7 @@ dataset:
   modality:
     - "cbct"
     - "ct"
-  num_slices: 7
+  num_slices: 9          # ratio-8: D=9→4→2→1 with 3 stride-2 ops → D_latent=1
   patch_size: [128, 128]
   overlap: 0.25
   interpolate: True
