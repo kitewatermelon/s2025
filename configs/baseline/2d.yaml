@@ -1,0 +1,67 @@
+# Baseline — 2D Latent Diffusion (no slice context)
+# WandB run: baseline_2d_seed{seed}  tag: model_comparison
+# Train script: python train_vdm_uvit_2d.py -c configs/baseline/2d.yaml
+default:
+  experiment_name: "baseline_2d"
+  make_logs: True
+  device: 0
+  random_seed: 42
+  checkpoint_dir: checkpoints
+  wandb_tags:
+    - model_comparison
+
+paths:
+  cbct_vqvae_config: "checkpoints/vqgan_3_768_new_data_cbct/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/vqgan_3_768_new_data_cbct/model_5000.pt"
+  ct_vqvae_config: "checkpoints/vqgan_3_768_new_data_ct/config.yaml"
+  ct_vq_checkpoint: "checkpoints/vqgan_3_768_new_data_ct/model_5000.pt"
+
+optim:
+  lr: 1e-4
+  weight_decay: 0.01
+
+uvit:
+  img_size: 32
+  patch_size: 2
+  in_chans: 2
+  embed_dim: 512
+  depth: 11
+  num_heads: 4
+  conv: True
+
+dataset:
+  data_path: "synthRAD2025_Task2_Train_D_2D/Task2"
+  anatomy:
+    - "AB"
+    - "HN"
+    - "TH"
+  modality:
+    - "cbct"
+    - "ct"
+  interpolate: True
+  interpolation_size: [128, 128]
+  patch_size: [128, 128]
+  overlap: 0.25
+  train_batch_size: 6
+  val_batch_size: 6
+  train_shuffle: True
+  val_shuffle: False
+  num_workers: 6
+  augment: False
+  rand_adj_contrast:
+    prob: 0.5
+    gamma: [0.5, 1.5]
+  rand_affine:
+    prob: 0.5
+  minv: 0
+  maxv: 1
+
+gamma_min: -5.
+gamma_max: 5.
+noise_schedule: "learned_linear"
+antithetic_time_sampling: True
+use_fourier_features: False
+
+num_steps: 100_000
+save_and_eval_every: 1000
+n_sample_steps: 200

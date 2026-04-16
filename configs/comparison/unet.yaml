@@ -1,0 +1,81 @@
+# Model Comparison — U-Net denoiser backbone (UViT ablation, R2-4)
+# UNetDenoiser를 VDM 백본으로 사용. VQ-VAE는 2.5D baseline과 동일.
+# WandB run: comparison_unet_seed{seed}  tag: model_comparison
+# Train script: python train_vdm_uvit_2.5d.py -c configs/comparison/unet.yaml
+default:
+  experiment_name: "comparison_unet"
+  make_logs: True
+  device: 0
+  random_seed: 42
+  checkpoint_dir: checkpoints
+  backbone: unet            # uvit | unet — build_backbone() 분기
+  wandb_tags:
+    - model_comparison
+
+paths:
+  cbct_vqvae_config: "checkpoints/2.5D_cbct_PATCH_NORM/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/2.5D_cbct_PATCH_NORM/model_1000.pt"
+  ct_vqvae_config: "checkpoints/2.5D_ct_PATCH_NORM/config.yaml"
+  ct_vq_checkpoint: "checkpoints/2.5D_ct_PATCH_NORM/model_1000.pt"
+
+optim:
+  lr: 1e-4
+  weight_decay: 0.01
+
+# UNetDenoiser 아키텍처 설정
+# img_size=32 (ratio-4 VQ-VAE latent), mults=[1,2,4] → bottleneck at 4×4
+unet_denoiser:
+  img_size: 32
+  in_chans: 2              # z_noisy + z_cond (concat, UViT와 동일)
+  base_channels: 128
+  channel_mults: [1, 2, 4] # channels: [128, 256, 512], 3 downsample steps
+  num_res_blocks: 2
+  dropout: 0.0
+
+# UViT 섹션 (count_params.py --model uvit 용도 — 학습에는 미사용)
+uvit:
+  img_size: 32
+  patch_size: 2
+  in_chans: 2
+  embed_dim: 512
+  depth: 11
+  num_heads: 4
+  conv: True
+
+dataset:
+  data_path: "synthRAD2025_Train_2.5D/Task2"
+  anatomy:
+    - "AB"
+    - "HN"
+    - "TH"
+  modality:
+    - "cbct"
+    - "ct"
+  num_slices: 7
+  patch_size: [128, 128]
+  overlap: 0.25
+  interpolate: True
+  interpolation_size: [128, 128]
+  train_batch_size: 4
+  val_batch_size: 4
+  train_shuffle: True
+  val_shuffle: False
+  num_workers: 6
+  augment: False
+  rand_adj_contrast:
+    prob: 0.5
+    gamma: [0.5, 1.5]
+  rand_affine:
+    prob: 0.5
+  minv: 0
+  maxv: 1
+
+gamma_min: -5.
+gamma_max: 5.
+noise_schedule: "learned_linear"
+antithetic_time_sampling: True
+use_fourier_features: False
+
+num_steps: 60_000
+save_and_eval_every: 1000
+n_sample_steps: 200

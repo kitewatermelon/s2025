@@ -13,3 +13,13 @@ ground_truth/
 results/
 logs/
 *.zip
+*.mha 
+
+dataset/*
+
+dataset/train/*
+
+
+.venv/
+.claude/
+plan*

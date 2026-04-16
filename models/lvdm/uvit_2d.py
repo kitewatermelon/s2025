@@ -187,7 +187,7 @@ class FourierFeatures(nn.Module):
 
         # Compute (2pi * 2^n) for n in freqs.
         freqs_exponent = self.freqs_exponent.to(dtype=x.dtype, device=x.device)  # (F, )
-        freqs = 2.0**freqs_exponent * 2 * pi  # (F, )
+        freqs = 2.0**freqs_exponent * 2 * math.pi  # (F, )
         freqs = freqs.view(-1, *([1] * (x.dim() - 1)))  # (F, 1, 1, ...)
 
         # Compute (2pi * 2^n * x) for n in freqs.
@@ -232,7 +232,7 @@ class Attention(nn.Module):
             attn = self.attn_drop(attn)
             x = (attn @ v).transpose(1, 2).reshape(B, L, C)
         else:
-            raise NotImplemented
+            raise NotImplementedError()
 
         x = self.proj(x)
         x = self.proj_drop(x)

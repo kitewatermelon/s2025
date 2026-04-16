@@ -1,0 +1,68 @@
+# Region Evaluation — Thorax only
+# WandB run: region_eval_th_seed{seed}  tag: region_eval
+# Metrics logged with _th suffix: psnr_th, ssim_th, rmse_th, fid_th
+default:
+  experiment_name: "region_eval_th"
+  make_logs: True
+  device: 0
+  random_seed: 42
+  checkpoint_dir: checkpoints
+  wandb_tags:
+    - region_eval
+
+paths:
+  cbct_vqvae_config: "checkpoints/2.5D_cbct_PATCH_NORM/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/2.5D_cbct_PATCH_NORM/model_1000.pt"
+  ct_vqvae_config: "checkpoints/2.5D_ct_PATCH_NORM/config.yaml"
+  ct_vq_checkpoint: "checkpoints/2.5D_ct_PATCH_NORM/model_1000.pt"
+
+optim:
+  lr: 1e-4
+  weight_decay: 0.01
+
+uvit:
+  img_size: 32
+  patch_size: 2
+  in_chans: 2
+  embed_dim: 512
+  depth: 11
+  num_heads: 4
+  conv: True
+
+dataset:
+  data_path: "synthRAD2025_Train_2.5D/Task2"
+  anatomy:
+    - "TH"               # Thorax only
+  modality:
+    - "cbct"
+    - "ct"
+  num_slices: 7
+  patch_size: [128, 128]
+  overlap: 0.25
+  interpolate: True
+  interpolation_size: [128, 128]
+  train_batch_size: 6
+  val_batch_size: 6
+  train_shuffle: True
+  val_shuffle: False
+  num_workers: 6
+  augment: False
+  rand_adj_contrast:
+    prob: 0.5
+    gamma: [0.5, 1.5]
+  rand_affine:
+    prob: 0.5
+  minv: 0
+  maxv: 1
+
+region_suffix: "th"
+
+gamma_min: -5.
+gamma_max: 5.
+noise_schedule: "learned_linear"
+antithetic_time_sampling: True
+use_fourier_features: False
+
+num_steps: 60_000
+save_and_eval_every: 1000
+n_sample_steps: 200

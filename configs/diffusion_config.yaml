@@ -9,11 +9,11 @@ default:
 
 # Paths
 paths:
-  cbct_vqvae_config: "checkpoints/vqgan_3_768_new_data_cbct/config.yaml"
-  cbct_vq_checkpoint: "checkpoints/vqgan_3_768_new_data_cbct/model_5000.pt"
+  cbct_vqvae_config: "checkpoints/vqvae_cbct/n9/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/vqvae_cbct/n9/model_5000.pt"
   
-  ct_vqvae_config: "checkpoints/vqgan_3_768_new_data_ct/config.yaml"
-  ct_vq_checkpoint: "checkpoints/vqgan_3_768_new_data_ct/model_5000.pt"
+  ct_vqvae_config: "checkpoints/vqvae_ct/n9/config.yaml"
+  ct_vq_checkpoint: "checkpoints/vqvae_ct/n9/model_5000.pt"
 
 optim:
   lr: 1e-4
@@ -44,6 +44,8 @@ dataset:
     - "ct"  
   interpolate: True # ["brain"], ["brain", "pelvis"]
   interpolation_size: [128, 128]
+  patch_size: [128, 128]
+  overlap: 0.25
   train_batch_size: 6  # should be set to 1 for latent extraction
   val_batch_size: 6  # should be set  to 1 for latent extraction
   train_shuffle: True
@@ -67,6 +69,8 @@ gamma_max: 5.
 noise_schedule: "learned_linear"
 antithetic_time_sampling: True
 use_fourier_features: False
+
+center_slice_only: true  # 2D 모드: recon_loss를 가운데 슬라이스만 사용
 
 num_steps: 100_000
 # save_and_eval_every: 1

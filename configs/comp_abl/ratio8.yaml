@@ -1,0 +1,70 @@
+# Compression Ablation — compression ratio = 8  (embedding_dim=1 with 8x downsampling)
+# WandB run: comp_abl_ratio8_seed{seed}  tag: compression_ablation
+# NOTE: Stage 1 VQ-VAE checkpoint must be retrained with this ratio.
+default:
+  experiment_name: "comp_abl_ratio8"
+  make_logs: True
+  device: 0
+  random_seed: 42
+  checkpoint_dir: checkpoints
+  wandb_tags:
+    - compression_ablation
+
+paths:
+  cbct_vqvae_config: "checkpoints/comp_abl_ratio8_cbct/config.yaml"
+  cbct_vq_checkpoint: "checkpoints/comp_abl_ratio8_cbct/model_1000.pt"
+  ct_vqvae_config: "checkpoints/comp_abl_ratio8_ct/config.yaml"
+  ct_vq_checkpoint: "checkpoints/comp_abl_ratio8_ct/model_1000.pt"
+
+optim:
+  lr: 1e-4
+  weight_decay: 0.01
+
+uvit:
+  img_size: 16           # img_size halved due to 8x compression
+  patch_size: 2
+  in_chans: 2
+  embed_dim: 512
+  depth: 11
+  num_heads: 4
+  conv: True
+
+dataset:
+  data_path: "synthRAD2025_Train_2.5D/Task2"
+  anatomy:
+    - "AB"
+    - "HN"
+    - "TH"
+  modality:
+    - "cbct"
+    - "ct"
+  num_slices: 7
+  patch_size: [128, 128]
+  overlap: 0.25
+  interpolate: True
+  interpolation_size: [128, 128]
+  train_batch_size: 6
+  val_batch_size: 6
+  train_shuffle: True
+  val_shuffle: False
+  num_workers: 6
+  augment: False
+  rand_adj_contrast:
+    prob: 0.5
+    gamma: [0.5, 1.5]
+  rand_affine:
+    prob: 0.5
+  minv: 0
+  maxv: 1
+
+compression_ratio: 8
+
+gamma_min: -5.
+gamma_max: 5.
+noise_schedule: "learned_linear"
+antithetic_time_sampling: True
+use_fourier_features: False
+
+num_steps: 60_000
+save_and_eval_every: 1000
+n_sample_steps: 200

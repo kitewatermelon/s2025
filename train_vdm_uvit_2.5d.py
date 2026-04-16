@@ -1,60 +1,26 @@
+"""train_vdm_uvit_2.5d.py — 2.5D Latent Diffusion Model 학습."""
+from __future__ import annotations
+
+import argparse
+
 import torch
-import torchinfo
-import os
-from pathlib import Path
-
-from torch.utils.data import Subset
-
+import wandb
+from accelerate import Accelerator
 from monai.bundle import ConfigParser
 from monai.utils import set_determinism
-from datetime import datetime
-from ema_pytorch import EMA
-
-import copy
-import argparse
 from tqdm.auto import tqdm
 
-from accelerate import Accelerator
-from accelerate.utils import set_seed
-
-from torch.utils.tensorboard import SummaryWriter
-from torchvision.utils import make_grid
-import numpy as np
-
-
-from monai.networks.nets import VQVAE
-from dataset import setup_dataloaders
-import pdb
-
-import json, matplotlib.pyplot as plt
-from torchvision.utils import make_grid
-import torch.nn.functional as F
-import torchvision.transforms as T
-from monai.metrics import PSNRMetric, SSIMMetric
-from monai.metrics.fid import FIDMetric
-from torchvision.models import inception_v3
-
+from dataset import setup_dataloaders_volume as setup_dataloaders
+from lib.base_trainer import BaseVDMTrainer
+from lib.experiment import setup_experiment
+from lib.vqvae_utils import load_vqvae
 from models.lvdm.uvit_2d import UViT
-from models.lvdm.vdm_2_5d import VDM
-from models.lvdm.utils import (
-    DeviceAwareDataLoader,
-    TrainConfig,
-    check_config_matches_checkpoint,
-    cycle,
-    evaluate_model_and_log,
-    get_date_str,
-    handle_results_path,
-    has_int_squareroot,
-    init_config_from_args,
-    init_logger,
-    log,
-    make_cifar,
-    print_model_summary,
-    sample_batched,
-)
+from models.lvdm.unet_denoiser import UNetDenoiser
+from models.lvdm.vdm import VDM
+from models.lvdm.utils import init_logger
 
 
-class Trainer:
+class Trainer25D(BaseVDMTrainer):
     def __init__(
         self,
         diffusion_model,
@@ -66,22 +32,14 @@ class Trainer:
         accelerator,
         optimizer,
         cfg,
-        num_steps=100_000,
-        ema_decay=0.9999,
-        ema_update_every=1,
-        ema_power=3/4,
-        save_and_eval_every=1000,
-        num_samples=8,
-        results_path="./results",
-        resume=False,
-        clip_samples=False,
-        num_classes=None
+        num_steps: int = 100_000,
+        save_and_eval_every: int = 1000,
+        num_samples: int = 8,
+        clip_samples: bool = False,
     ):
-        super().__init__()
         self.diffusion_model = diffusion_model
         self.ae_model_ct = ae_model_ct
         self.ae_model_cbct = ae_model_cbct
-        self.train_dataloader = train_dataloader
         self.validation_dataloader = val_dataloader
         self.test_dataloader = test_dataloader
         self.accelerator = accelerator
@@ -91,47 +49,66 @@ class Trainer:
         self.num_steps = num_steps
         self.clip_samples = clip_samples
         self.step = 0
-        
-        self.opt = optimizer
-        self.writer = None
-        
-        experiment_name = cfg["default"]["experiment_name"]
-        DEVICE = self.cfg["default"]["device"]
-        self.device = torch.device(DEVICE)
+        self.device = torch.device(cfg["default"]["device"])
 
-        if cfg["default"]["make_logs"]:
-            if "experiment_name" in cfg.default.keys():
-                experiment_name = cfg["default"]["experiment_name"]
-            else:
-                experiment_name = f"diffusion@{datetime.now().strftime('%d.%m.%Y-%H:%M')}"
-            self.experiment_dir = Path(cfg["default"]["checkpoint_dir"]) / experiment_name
+        self.experiment_dir, self.writer = setup_experiment(cfg)
 
-            self.experiment_dir.mkdir(exist_ok=True, parents=True)
-            cfg.export_config_file(cfg.get_parsed_content(), os.path.join(self.experiment_dir, "config.yaml"), fmt="yaml")
-            self.writer = SummaryWriter(self.experiment_dir, "tb")
-
+        self._train_dl = train_dataloader          # kept for train() loop
         self.diffusion_model = accelerator.prepare(diffusion_model)
         self.opt = accelerator.prepare(optimizer)
-        
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_5d(img: torch.Tensor) -> torch.Tensor:
+        """(B,D,H,W) → (B,1,D,H,W). Already 5D tensors are returned as-is."""
+        return img.unsqueeze(1) if img.dim() == 4 else img
+
+    # ── template methods ──────────────────────────────────────────────────────
+
+    def _val_generate(self, data):
+        cbct = self._to_5d(data["cbct"].to(self.device))
+        ct   = self._to_5d(data["ct"].to(self.device))
+        c    = self.cfg["dataset"]["num_slices"] // 2  # center slice index
+
+        z_target = self.ae_model_ct.encode_stage_2_inputs(ct).squeeze(2)
+        z_cond   = self.ae_model_cbct.encode_stage_2_inputs(cbct).squeeze(2)
+        loss, _  = self.diffusion_model(z_target, z_cond, ct)
+
+        sampled_z = self.sample_conditional(z_cond, self.cfg["n_sample_steps"]).unsqueeze(2)
+        ct_gen    = self.ae_model_ct.decode_stage_2_outputs(sampled_z)[:, :, c, :, :]
+        ct_gt     = self.ae_model_ct.decode_stage_2_outputs(z_target.unsqueeze(2))[:, :, c, :, :]
+        cbct_2d   = cbct[:, :, c, :, :]
+        return cbct_2d, ct_gen, ct_gt, loss
+
+    def _eval_generate(self, batch):
+        cbct    = self._to_5d(batch["cbct"].to(self.device))
+        ct_gt5d = self._to_5d(batch["ct"].to(self.device))
+        c       = self.cfg["dataset"]["num_slices"] // 2  # center slice index
+
+        z_cond    = self.ae_model_cbct.encode_stage_2_inputs(cbct).squeeze(2)
+        sampled_z = self.sample_conditional(z_cond, self.cfg["n_sample_steps"]).unsqueeze(2)
+        ct_gen    = self.ae_model_ct.decode_stage_2_outputs(sampled_z)[:, :, c, :, :]
+        ct_gt     = ct_gt5d[:, :, c, :, :]
+        cbct_2d   = cbct[:, :, c, :, :]
+        return cbct_2d, ct_gen, ct_gt
+
+    # ── training loop ─────────────────────────────────────────────────────────
+
     def train(self):
         with tqdm(
-            total=self.num_steps,               # 전체 step 개수
+            total=self.num_steps,
             desc="Training",
             disable=not self.accelerator.is_main_process,
         ) as pbar:
-            while self.step < self.num_steps:   # 원하는 step까지 반복
-                for data in self.train_dataloader:
-                    cbct_img, ct_img = data["cbct"].to(self.device), data["ct"].to(self.device)
-                    if cbct_img.dim() == 4:
-                        cbct_img = cbct_img.unsqueeze(1)
-                    if ct_img.dim() == 4:
-                        ct_img = ct_img.unsqueeze(1)
+            while self.step < self.num_steps:
+                for data in self._train_dl:
+                    cbct_img = self._to_5d(data["cbct"].to(self.device))
+                    ct_img   = self._to_5d(data["ct"].to(self.device))
 
                     with torch.no_grad():
-                        z = self.ae_model_ct.encode_stage_2_inputs(ct_img)
-                        z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img)
-                        z = z.squeeze(2)
-                        z_cond = z_cond.squeeze(2)
+                        z      = self.ae_model_ct.encode_stage_2_inputs(ct_img).squeeze(2)
+                        z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img).squeeze(2)
 
                     self.opt.zero_grad()
                     loss, metrics_tr = self.diffusion_model(z, z_cond, ct_img)
@@ -140,467 +117,109 @@ class Trainer:
 
                     self.step += 1
                     pbar.set_description(f"loss: {loss.item():.4f}")
-                    pbar.update(1)   # 매 step마다 진행률 업데이트
+                    pbar.update(1)
                     self.accelerator.wait_for_everyone()
 
                     if self.accelerator.is_main_process:
-                        if hasattr(self, 'ema'):
+                        if hasattr(self, "ema"):
                             self.ema.update()
                         if self.step % self.save_and_eval_every == 0:
                             self.validation()
                             self.eval()
                             print(f"Completed step {self.step}/{self.num_steps}")
 
-                    if self.step % 100 == 0:
-                        self.writer.add_scalar("train/diff_loss", metrics_tr["diff_loss"].item(), self.step)
+                    if self.step % 100 == 0 and self.writer is not None:
+                        self.writer.add_scalar("train/diff_loss",   metrics_tr["diff_loss"].item(),   self.step)
                         self.writer.add_scalar("train/latent_loss", metrics_tr["latent_loss"].item(), self.step)
-                        self.writer.add_scalar("train/recon_loss", metrics_tr["recon_loss"].item(), self.step)
+                        self.writer.add_scalar("train/recon_loss",  metrics_tr["recon_loss"].item(),  self.step)
+                        if self.cfg["default"]["make_logs"]:
+                            wandb.log({
+                                "train/diff_loss":   metrics_tr["diff_loss"].item(),
+                                "train/latent_loss": metrics_tr["latent_loss"].item(),
+                                "train/recon_loss":  metrics_tr["recon_loss"].item(),
+                            }, step=self.step)
 
-                    if self.step >= self.num_steps:  # 다 돌면 종료
+                    if self.step >= self.num_steps:
                         return
 
-    def validation(self):
-        """Evaluate the model by sampling from the diffusion process and calculating metrics."""
-        #pdb.set_trace()
-        print("=============================VALID=============================")
-        self.accelerator.unwrap_model(self.diffusion_model)
-        self.diffusion_model.eval()
 
-        # Initialize metrics for 2D data
-        psnr_metric = PSNRMetric(max_val=1.0)  # For data in range [-1, 1]
-        ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=2)  # Changed to 2D
-        
-        all_metrics = {
-            "val_psnr": [],
-            "val_ssim": [],
-            "val_loss": []
-        }
-        self.diffusion_model.eval()
-        with torch.no_grad():
-            # Process validation set in batches
-            for data in self.validation_dataloader:
-                print(data)
-                cbct_img, ct_img = data["cbct"].to(self.device), data["ct"].to(self.device)
-                if cbct_img.dim() == 4:  # (B, H, W, D)
-                    cbct_img = cbct_img.unsqueeze(1)
-                if ct_img.dim() == 4:  # (B, H, W, D)
-                    ct_img = ct_img.unsqueeze(1)
-
-                z_target = self.ae_model_ct.encode_stage_2_inputs(ct_img)
-                z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct_img)
-                z_target = z_target.squeeze(2)
-                z_cond = z_cond.squeeze(2)
-
-                loss, metrics = self.diffusion_model(z_target, z_cond, ct_img)
-                
-                sampled_z = self.sample_conditional(z_cond, self.cfg["n_sample_steps"])
-                sampled_z = sampled_z.unsqueeze(2)
-                z_target = z_target.unsqueeze(2)
-                decoded_sampled = self.ae_model_ct.decode_stage_2_outputs(sampled_z)
-                decoded_target = self.ae_model_ct.decode_stage_2_outputs(z_target)
-                # print("dddd" , decoded_sampled.shape, decoded_target.shape)
-                decoded_sampled = decoded_sampled[:, :, 2, :, :]  # 3번째 축의 2번 인덱스만 선택
-                decoded_target = decoded_target[:, :, 2, :, :]    # 마찬가지로
-                # For 2D data, we don't need to select middle slice
-                psnr_metric(decoded_sampled, decoded_target)
-                ssim_metric(decoded_sampled, decoded_target)
-                
-                all_metrics["val_loss"].append(loss.item())
-        
-        # Compute average metrics
-        val_psnr = psnr_metric.aggregate().item()
-        val_ssim = ssim_metric.aggregate().item()
-        val_loss = sum(all_metrics["val_loss"]) / len(all_metrics["val_loss"])
-        
-        # Log metrics to tensorboard if available
-        if self.writer is not None:
-            self.writer.add_scalar("validation/loss", val_loss, self.step)
-            self.writer.add_scalar("validation/psnr", val_psnr, self.step)
-            self.writer.add_scalar("validation/ssim", val_ssim, self.step)
-            # print(cbct_img[0].shape, decoded_sampled[0].shape, decoded_target[0].shape)
-            # Log image samples for 2D data
-            if decoded_sampled.shape[0] > 0:
-                # Create grid of sample images: condition, generated, ground truth
-                img_grid = make_grid([
-                    cbct_img[0][:, 2, :, :],  # condition
-                    decoded_sampled[0],  # generated
-                    decoded_target[0]  # ground truth
-                ], nrow=3, normalize=True)
-                self.writer.add_image("validation/samples", img_grid, self.step)
-        
-        # Print metrics
-        print(f"\nValidation @ step {self.step}: PSNR={val_psnr:.4f}, SSIM={val_ssim:.4f}, Loss={val_loss:.4f}")
-        
-        # Save checkpoint if needed
-        if self.cfg["default"]["make_logs"]:
-            self.save_checkpoint()
-        
-        # Return model to training mode
-        self.diffusion_model.train()
-        
-        return val_loss
-
-    
-    def eval(self):
-        """
-        Evaluate the diffusion model on the held‑out test_set.
-
-        Outputs
-        -------
-        <exp_dir>/test_metrics.json   # psnr, ssim, mse, fid
-        <exp_dir>/qualitative.png     # CBCT | generated‑CT | GT‑CT | |diff|
-        """
-
-        # print("EVAL")
-        self.accelerator.unwrap_model(self.diffusion_model)
-        self.diffusion_model.eval()
-
-        # ─── metric objects ────────────────────────────────────────────────────────
-        psnr = PSNRMetric(max_val=1.0)
-        ssim = SSIMMetric(data_range=1.0, spatial_dims=2)
-        fid_metric = FIDMetric()
-
-        mse_running, n_seen = 0.0, 0
-
-        # Inception‑v3 feature extractor for FID (pool‑3 layer, 2048‑D)
-        
-        inception = inception_v3(pretrained=True, transform_input=False).to(
-            self.accelerator.device
+def build_backbone(cfg) -> torch.nn.Module:
+    """config의 default.backbone 키에 따라 백본 생성. 기본값: uvit."""
+    backbone = cfg["default"].get("backbone", "uvit")
+    if backbone == "uvit":
+        return UViT(
+            img_size=cfg["uvit"]["img_size"],
+            patch_size=cfg["uvit"]["patch_size"],
+            in_chans=cfg["uvit"]["in_chans"],
+            embed_dim=cfg["uvit"]["embed_dim"],
+            depth=cfg["uvit"]["depth"],
+            num_heads=cfg["uvit"]["num_heads"],
+            conv=cfg["uvit"]["conv"],
+            gamma_max=cfg["gamma_max"],
+            gamma_min=cfg["gamma_min"],
         )
-        inception.fc = torch.nn.Identity()
-        inception.eval()
-
-        def inception_feats(x: torch.Tensor) -> torch.Tensor:
-            # x: (B,1,H,W) in [-1,1]  ➜ (B,2048)
-            x = (x.clamp(-1, 1) + 1) / 2
-            x = x.repeat(1, 3, 1, 1)                                      # 1‑ch → 3‑ch
-            with torch.no_grad():
-                z = inception(x)
-            return z.flatten(1)                                           # (B,2048)
-
-        feats_real, feats_fake = [], []
-        samples_done = 0
-        saved_grid   = False
-        qual_imgs = []  
-
-        # ─── loop through the test set ────────────────────────────────────────────
-        for batch in self.test_dataloader:
-            cbct, ct_gt = batch["cbct"].to(self.device), batch["ct"].to(self.device)
-            if cbct.dim() == 4:  # (B, H, W, D)
-                cbct = cbct.unsqueeze(1)
-            if ct_gt.dim() == 4:  # (B, H, W, D)
-                ct_gt = ct_gt.unsqueeze(1)
-
-            with torch.no_grad():
-                z_cond = self.ae_model_cbct.encode_stage_2_inputs(cbct)
-                # print(z_cond.shape)
-                z_cond = z_cond.squeeze(2)
-                sampled_z = self.sample_conditional(z_cond, self.cfg["n_sample_steps"])
-                sampled_z = sampled_z.unsqueeze(2)
-                ct_gen = self.ae_model_ct.decode_stage_2_outputs(sampled_z)
-            # z_cond = z_cond.squeeze(2)
-            ct_gen = ct_gen[:,:,2,:,:]
-            ct_gt = ct_gt[:,:,2,:,:]
-
-            # metrics …
-            psnr(ct_gen, ct_gt)
-            ssim(ct_gen, ct_gt)
-            mse_running += F.mse_loss(ct_gen, ct_gt, reduction="sum").item()
-            n_seen      += ct_gt.numel()
-
-            feats_fake.append(inception_feats(ct_gen))
-            feats_real.append(inception_feats(ct_gt))
-            # print(cbct.shape, ct_gen.shape, ct_gt.shape)
-            ct_gen = ct_gen
-            ct_gt = ct_gt
-            cbct = cbct[:,:,2,:,:]
-            # print(cbct.shape, ct_gen.shape, ct_gt.shape)
-
-            # collect qualitative slices (move to CPU so GPU can be freed)
-            for i in range(cbct.size(0)):
-                if len(qual_imgs) >= 4 * self.num_samples:
-                    break
-                diff = (ct_gen[i] - ct_gt[i]).abs()
-                for tensor in (cbct[i], ct_gen[i], ct_gt[i], diff):
-                    # print(cbct[i].shape, ct_gen[i].shape, ct_gt[i].shape, diff.shape)
-                    qual_imgs.append(tensor.detach().cpu())      # <-- off‑load now
-
-            samples_done += cbct.size(0)
-            if samples_done >= self.num_samples:
-                break
-        
-        if qual_imgs:
-            grid = make_grid(
-                torch.stack(qual_imgs, 0),     # shape (4·N, 1, H, W)
-                nrow=4,
-                normalize=False,
-                value_range=(0, 1)            # keep CT intensities consistent
-            )
-            plt.figure(figsize=(10, 3 * self.num_samples))
-            plt.axis("off")
-            plt.imshow(grid.permute(1, 2, 0), cmap="gray")
-            plt.savefig(self.experiment_dir / f"qualitative_step-{self.step}.png",
-                        bbox_inches="tight", dpi=200)
-            plt.close()
-
-        # ─── reduce & log ─────────────────────────────────────────────────────────
-        psnr_val = psnr.aggregate().item()
-        ssim_val = ssim.aggregate().item()
-        mse_val  = mse_running / n_seen
-        fid_val  = fid_metric(torch.vstack(feats_fake),
-                            torch.vstack(feats_real)).item()
-
-        results = dict(psnr=psnr_val, ssim=ssim_val, mse=mse_val, fid=fid_val)
-        (self.experiment_dir / f"test_metrics_{self.step}.json").write_text(
-            json.dumps(results, indent=2)
+    elif backbone == "unet":
+        ud = cfg["unet_denoiser"]
+        return UNetDenoiser(
+            img_size=ud["img_size"],
+            in_chans=ud["in_chans"],
+            base_channels=ud["base_channels"],
+            channel_mults=tuple(ud["channel_mults"]),
+            num_res_blocks=ud["num_res_blocks"],
+            dropout=ud.get("dropout", 0.0),
+            gamma_min=cfg["gamma_min"],
+            gamma_max=cfg["gamma_max"],
         )
+    else:
+        raise ValueError(f"Unknown backbone '{backbone}'. Choose 'uvit' or 'unet'.")
 
-        print(f"\nTEST ▸  PSNR {psnr_val:.3f}  SSIM {ssim_val:.3f}  "
-            f"MSE {mse_val:.5f}  FID {fid_val:.3f}")
-
-        self.diffusion_model.train()
-
-    def sample_conditional(self, z_cond, n_sample_steps):
-        """Sample from the diffusion model using conditioning with a progress bar."""
-        # Get batch size from conditioning
-        batch_size = z_cond.shape[0]
-        
-        z = torch.randn((batch_size, *self.diffusion_model.image_shape), device=self.accelerator.device)
-        # DEBUG 
-        """
-        [sample_conditional, z] torch.Size([6, 1, 32, 32])
-        """
-        steps = torch.linspace(1.0, 0.0, n_sample_steps + 1, device=self.accelerator.device)
-        with torch.no_grad():
-
-            disable_pbar = not self.accelerator.is_main_process
-            
-            for i in tqdm(range(n_sample_steps), desc="Sampling", leave=False, disable=disable_pbar):
-                # print("[i]", i)                
-                # print("[sample_conditional, z1]", z.shape)
-                z = self.diffusion_model.sample_p_s_t(
-                    z, 
-                    steps[i], 
-                    steps[i + 1], 
-                    clip_samples=self.clip_samples, 
-                    context=z_cond
-                )
-                # print("[sample_conditional, i]", i)
-                # print("[sample_conditional, z2]", z.shape)
-        
-        return z
-
-    def save_checkpoint(self):
-        """Save model checkpoint."""
-        checkpoint = {
-            "step": self.step,
-            "model": self.accelerator.unwrap_model(self.diffusion_model).state_dict(),
-            "opt": self.opt.state_dict(),
-        }
-        
-        # Add EMA model if present
-        if hasattr(self, 'ema') and self.accelerator.is_main_process:
-            checkpoint["ema"] = self.ema.state_dict()
-        
-        torch.save(checkpoint, self.experiment_dir / f"model_{self.step}.pt")
-        torch.save(checkpoint, self.experiment_dir / "latest.pt")
-        
-        # Save configuration
-        config_path = self.experiment_dir / "config.yaml"
-        if not config_path.exists():
-            self.cfg.exconfig.export_config_file(
-                self.cfg.get_parsed_content(), 
-                str(config_path), 
-                fmt="yaml"
-            )
-        
 
 def main(cfg):
-    
-    # Override config with command line arguments if provided
-    DEVICE = cfg["default"]["device"]
-    device = torch.device(DEVICE)
-    seed = cfg["default"]["device"]
-    set_determinism(seed=seed)
+    device = torch.device(cfg["default"]["device"])
+    set_determinism(seed=cfg["default"]["random_seed"])
 
-    # Check if CBCT VQVAE config and checkpoint files exist
-    cbct_config_path = cfg["paths"]["cbct_vqvae_config"]
-    cbct_checkpoint_path = cfg["paths"]["cbct_vq_checkpoint"]
-    
-    if not os.path.exists(cbct_config_path):
-        raise FileNotFoundError(f"CBCT VQVAE config file not found: {cbct_config_path}")
-    if not os.path.exists(cbct_checkpoint_path):
-        raise FileNotFoundError(f"CBCT VQVAE checkpoint file not found: {cbct_checkpoint_path}")
-    
-    # Check if CT VQVAE config and checkpoint files exist
-    ct_config_path = cfg["paths"]["ct_vqvae_config"]
-    ct_checkpoint_path = cfg["paths"]["ct_vq_checkpoint"]
-    
-    if not os.path.exists(ct_config_path):
-        raise FileNotFoundError(f"CT VQVAE config file not found: {ct_config_path}")
-    if not os.path.exists(ct_checkpoint_path):
-        raise FileNotFoundError(f"CT VQVAE checkpoint file not found: {ct_checkpoint_path}")
-
-    print(f"Loading CBCT VQVAE from:")
-    print(f"  Config: {cbct_config_path}")
-    print(f"  Checkpoint: {cbct_checkpoint_path}")
-    
-    print(f"Loading CT VQVAE from:")
-    print(f"  Config: {ct_config_path}")
-    print(f"  Checkpoint: {ct_checkpoint_path}")
-
-    # Load CBCT VQVAE configuration
-    cbct_vqvae_config = ConfigParser()
-    cbct_vqvae_config.read_config(cbct_config_path)
-
-    # Load CT VQVAE configuration  
-    ct_vqvae_config = ConfigParser()
-    ct_vqvae_config.read_config(ct_config_path)
-
-    # Create CBCT autoencoder using CBCT config
-    cbct_num_channels_tuple = tuple(
-        int(x) for x in cbct_vqvae_config["vqvae"]["num_channels"].split(', ')
-    )
-    cbct_downsample_tuple = tuple(
-        tuple(
-            tuple(v)
-        ) for v in cbct_vqvae_config["vqvae"]["downsample_parameters"].values()
-    )
-    cbct_upsample_tuple = tuple(
-        tuple(
-            tuple(v)
-        ) for v in cbct_vqvae_config["vqvae"]["upsample_parameters"].values()
-    )
-
-    cbct_ae = VQVAE(
-        spatial_dims=int(cbct_vqvae_config["vqvae"]["spatial_dims"]),
-        in_channels=int(cbct_vqvae_config["vqvae"]["in_channels"]),
-        out_channels=int(cbct_vqvae_config["vqvae"]["out_channels"]),
-        channels=cbct_num_channels_tuple,
-        num_res_channels=int(cbct_vqvae_config["vqvae"]["num_res_channels"]),
-        num_res_layers=int(cbct_vqvae_config["vqvae"]["num_res_layers"]),
-        downsample_parameters=cbct_downsample_tuple,
-        upsample_parameters=cbct_upsample_tuple,
-        num_embeddings=int(cbct_vqvae_config["vqvae"]["num_embeddings"]),  # codebook length
-        embedding_dim=int(cbct_vqvae_config["vqvae"]["embedding_dim"])
-    )
-
-    # Create CT autoencoder using CT config
-    ct_num_channels_tuple = tuple(
-        int(x) for x in ct_vqvae_config["vqvae"]["num_channels"].split(', ')
-    )
-    ct_downsample_tuple = tuple(
-        tuple(
-            tuple(v)
-        ) for v in ct_vqvae_config["vqvae"]["downsample_parameters"].values()
-    )
-    ct_upsample_tuple = tuple(
-        tuple(
-            tuple(v)
-        ) for v in ct_vqvae_config["vqvae"]["upsample_parameters"].values()
-    )
-
-    ct_ae = VQVAE(
-        spatial_dims=int(ct_vqvae_config["vqvae"]["spatial_dims"]),
-        in_channels=int(ct_vqvae_config["vqvae"]["in_channels"]),
-        out_channels=int(ct_vqvae_config["vqvae"]["out_channels"]),
-        channels=ct_num_channels_tuple,
-        num_res_channels=int(ct_vqvae_config["vqvae"]["num_res_channels"]),
-        num_res_layers=int(ct_vqvae_config["vqvae"]["num_res_layers"]),
-        downsample_parameters=ct_downsample_tuple,
-        upsample_parameters=ct_upsample_tuple,
-        num_embeddings=int(ct_vqvae_config["vqvae"]["num_embeddings"]),  # codebook length
-        embedding_dim=int(ct_vqvae_config["vqvae"]["embedding_dim"])
-    )
-    cbct_ae.load_state_dict(torch.load(cfg["paths"]["cbct_vq_checkpoint"])["model_state_dict"])
-    ct_ae.load_state_dict(torch.load(cfg["paths"]["ct_vq_checkpoint"])["model_state_dict"])
-
-    cbct_ae.to(device)
-    ct_ae.to(device)
-
-    cbct_ae.eval()
-    ct_ae.eval()
+    cbct_ae = load_vqvae(cfg["paths"]["cbct_vqvae_config"], cfg["paths"]["cbct_vq_checkpoint"], device)
+    ct_ae   = load_vqvae(cfg["paths"]["ct_vqvae_config"],   cfg["paths"]["ct_vq_checkpoint"],   device)
 
     accelerator = Accelerator(split_batches=True)
     init_logger(accelerator)
 
-    # Use CT VQGAN directory for dataset indices
-    stage_1_idxs_file = Path(cfg["paths"]["ct_vq_checkpoint"]).parent / "dataset_indices.json"
-    
-    # Check if dataset indices file exists
-    if not stage_1_idxs_file.exists():
-        raise FileNotFoundError(f"Dataset indices file not found: {stage_1_idxs_file}")
-    train_dataloader, validation_dataloader, test_dataloader = setup_dataloaders(cfg, save_train_idxs=False)
+    train_dl, val_dl, test_dl = setup_dataloaders(cfg, save_train_idxs=False)
 
-
-    check_data = next(iter(validation_dataloader))
-    check_data = check_data["ct"]
-    with torch.no_grad():
-        with torch.amp.autocast("cuda", enabled=True):
-            if check_data.dim() == 4:  # (B, H, W, D)
-                check_data = check_data.unsqueeze(1)
-            z = ct_ae.encode_stage_2_inputs(check_data.to(device))
-            z = z.squeeze(2)
-
+    # Probe latent shape
+    check_ct = next(iter(val_dl))["ct"]
+    if check_ct.dim() == 4:
+        check_ct = check_ct.unsqueeze(1)
+    with torch.no_grad(), torch.amp.autocast("cuda", enabled=True):
+        z = ct_ae.encode_stage_2_inputs(check_ct.to(device)).squeeze(2)
     print(f"Codebook latent shape: {z.shape}")
-    model = UViT(
-        img_size=cfg["uvit"]["img_size"],
-        patch_size=cfg["uvit"]["patch_size"],
-        in_chans=cfg["uvit"]["in_chans"],
-        embed_dim=cfg["uvit"]["embed_dim"],
-        depth=cfg["uvit"]["depth"],
-        num_heads=cfg["uvit"]["num_heads"],
-        conv=cfg["uvit"]['conv'],
-        # conv=cfg["uvit"],
-        gamma_max=cfg["gamma_max"],
-        gamma_min=cfg["gamma_min"],
-    )
-    
-    diffusion = VDM(
-        model,
-        cfg,
-        ct_ae,
-        image_shape=z[0].shape
-    )
-    
+
+    backbone_type = cfg["default"].get("backbone", "uvit")
+    model = build_backbone(cfg)
+    print(f"Backbone: {backbone_type}  |  params: {sum(p.numel() for p in model.parameters()):,}")
+
+    diffusion = VDM(model, cfg, ct_ae, image_shape=z[0].shape)
     optimizer = torch.optim.AdamW(
         diffusion.parameters(),
         eval(cfg["optim"]["lr"]),
         betas=(0.9, 0.99),
         weight_decay=cfg["optim"]["weight_decay"],
-        eps=1e-8
+        eps=1e-8,
     )
 
-    Trainer(
-        diffusion,
-        ct_ae,
-        cbct_ae,
-        train_dataloader,
-        validation_dataloader,
-        test_dataloader,
-        accelerator,
-        optimizer,
-        cfg,
+    Trainer25D(
+        diffusion, ct_ae, cbct_ae,
+        train_dl, val_dl, test_dl,
+        accelerator, optimizer, cfg,
         num_steps=cfg["num_steps"],
         save_and_eval_every=cfg["save_and_eval_every"],
     ).train()
 
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Start train")
-    parser.add_argument(
-        "-c",
-        "--config",
-        type=str,
-        help="path to configuration *.yaml file",
-        required=False,
-        default="configs/diffusion_config.yaml"
-    )
-
+    parser = argparse.ArgumentParser(description="Train 2.5D VDM")
+    parser.add_argument("-c", "--config", default="configs/2.5D_diffusion_config.yaml")
     args = parser.parse_args()
-
     config = ConfigParser()
     config.read_config(args.config)
-
     main(config)

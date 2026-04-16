@@ -1,0 +1,21 @@
+[project]
+name = "s2025"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.13.0",
+    "lpips>=0.1.4",
+    "monai>=1.5.2",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.7.2",
+    "simpleitk>=2.5.3",
+    "tensorboard>=2.20.0",
+    "timm>=1.0.26",
+    "torcheval>=0.0.7",
+    "torchinfo>=1.8.0",
+    "torchvision>=0.26.0",
+    "tqdm>=4.67.3",
+]
